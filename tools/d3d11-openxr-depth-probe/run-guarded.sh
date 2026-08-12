@@ -19,8 +19,8 @@ if [[ -z "$umu_run" ]]; then
 fi
 
 case "$stage" in
-  enumerate|views|clear|sample|teardown|recreate|discard) ;;
-  *) echo "usage: $0 [enumerate|views|clear|sample|teardown|recreate|discard] [probe-dir]" >&2; exit 2 ;;
+  enumerate|views|clear|sample|teardown|recreate|discard|draw|frame) ;;
+  *) echo "usage: $0 [enumerate|views|clear|sample|teardown|recreate|discard|draw|frame] [probe-dir]" >&2; exit 2 ;;
 esac
 
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
@@ -61,6 +61,8 @@ case "$stage" in
   teardown) expected='PASS: swapchain teardown drained outstanding D3D11 work; post-destroy fence completed' ;;
   recreate) expected='PASS: six depth swapchains destroyed, recreated, cleared, fenced, and destroyed again' ;;
   discard) expected='PASS: six depth swapchains destroyed, recreated, discarded/cleared, fenced, and destroyed again' ;;
+  draw) expected='PASS: paired color RTV and D32S8 DSV draw completed with an event fence' ;;
+  frame) expected='PASS: stereo color/depth draw and projection+depth xrEndFrame completed' ;;
 esac
 
 if (( status != 0 )); then
