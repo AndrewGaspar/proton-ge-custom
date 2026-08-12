@@ -134,6 +134,12 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("context1->DiscardView", probe)
         self.assertIn('std::strcmp(stage, "teardown")', probe)
         self.assertIn('std::strcmp(stage, "recreate")', probe)
+        self.assertIn('d3d11-openxr-depth-probe.stdout.log', probe)
+        self.assertIn('d3d11-openxr-depth-probe.stderr.log', probe)
+
+        runner = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/run-guarded.sh").read_text()
+        self.assertIn("expected='PASS: create and enumerate only'", runner)
+        self.assertIn('grep -Fqx "$expected" "$stdout_log"', runner)
 
         for usage in (
             "XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL",
