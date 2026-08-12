@@ -47,8 +47,30 @@ hr_ok(HRESULT result, const char * call)
 }
 
 static bool
-wait_for_vr_registry()
+initialize_vr_registry()
 {
+    using VrclientInitRegistry = BOOL (__cdecl *)(void);
+    static HMODULE vrclient = LoadLibraryA("vrclient_x64.dll");
+    if (!vrclient)
+    {
+        std::fprintf(stderr, "FAIL: LoadLibrary(vrclient_x64.dll) returned %lu\n", GetLastError());
+        return false;
+    }
+
+    const auto procedure = GetProcAddress(vrclient, "vrclient_init_registry");
+    VrclientInitRegistry initialize = nullptr;
+    std::memcpy(&initialize, &procedure, sizeof(initialize));
+    if (!initialize)
+    {
+        std::fprintf(stderr, "FAIL: vrclient_x64.dll has no vrclient_init_registry entry point\n");
+        return false;
+    }
+    if (!initialize())
+    {
+        std::fprintf(stderr, "FAIL: vrclient_init_registry returned false\n");
+        return false;
+    }
+
     constexpr ULONGLONG timeoutMs = 15000;
     const ULONGLONG deadline = GetTickCount64() + timeoutMs;
 
@@ -777,22 +799,29 @@ int main(int argc, char ** argv)
     const char * stage = argc > 1 ? argv[1] : "enumerate";
     std::printf("probe stage: %s\n", stage);
   if (std::strcmp(stage, "enumerate") != 0 &&
+      std::strcmp(stage, "bootstrap") != 0 &&
       std::strcmp(stage, "views") != 0 && std::strcmp(stage, "clear") != 0 &&
       std::strcmp(stage, "sample") != 0 &&
       std::strcmp(stage, "teardown") != 0 &&
       std::strcmp(stage, "recreate") != 0 &&
       std::strcmp(stage, "discard") != 0 && std::strcmp(stage, "draw") != 0 &&
-      std::strcmp(stage, "frame") != 0) {
+      std::strcmp(stage, "frame") != 0 && std::strcmp(stage, "unity") != 0) {
     std::fprintf(
         stderr,
         "usage: %s "
-        "[enumerate|views|clear|sample|teardown|recreate|discard|draw|frame]\n",
+        "[bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity]\n",
                      argv[0]);
         return 2;
     }
 
-    if (!wait_for_vr_registry())
+    if (!initialize_vr_registry())
         return 1;
+
+    if (std::strcmp(stage, "bootstrap") == 0)
+    {
+        std::printf("PASS: Proton and Wine VR bootstrap completed\n");
+        return 0;
+    }
 
     HMODULE loader = LoadLibraryA("openxr_loader.dll");
   if (!loader) {
@@ -813,6 +842,8 @@ int main(int argc, char ** argv)
     }
 
   const bool frameStage = std::strcmp(stage, "frame") == 0;
+  const bool unityStage = std::strcmp(stage, "unity") == 0;
+  const bool projectionStage = frameStage || unityStage;
   uint32_t extensionCount = 0;
   XR_CHECK(xr.enumerateExtensions(nullptr, 0, &extensionCount, nullptr));
   std::vector<XrExtensionProperties> extensionProperties(
@@ -824,14 +855,14 @@ int main(int argc, char ** argv)
     hasDepthComposition |=
         std::strcmp(extension.extensionName,
                     XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) == 0;
-  if (frameStage && !hasDepthComposition) {
+  if (projectionStage && !hasDepthComposition) {
     std::fprintf(stderr,
                  "FAIL: frame stage requires XR_KHR_composition_layer_depth\n");
     return 1;
   }
 
     std::vector<const char *> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
-    if (frameStage)
+    if (projectionStage)
         extensions.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(instanceInfo.applicationInfo.applicationName,
@@ -918,7 +949,7 @@ int main(int argc, char ** argv)
                  "FAIL: DXGI_FORMAT_D32_FLOAT_S8X24_UINT is not advertised\n");
     return 1;
   }
-  if ((std::strcmp(stage, "draw") == 0 || frameStage) &&
+  if ((std::strcmp(stage, "draw") == 0 || projectionStage) &&
       colorFormat == DXGI_FORMAT_UNKNOWN) {
     std::fprintf(
         stderr,
@@ -983,7 +1014,7 @@ int main(int argc, char ** argv)
         return 0;
     }
 
-  if (std::strcmp(stage, "draw") == 0 || frameStage) {
+  if (std::strcmp(stage, "draw") == 0 || projectionStage) {
     XrSwapchainCreateInfo colorInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     colorInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -998,7 +1029,7 @@ int main(int argc, char ** argv)
     std::array<SColorSwapchain, 2> colors;
     std::array<SDepthSwapchain, 2> depths;
     depths[0] = std::move(depth);
-    const uint32_t pairCount = frameStage ? 2 : 1;
+    const uint32_t pairCount = projectionStage ? 2 : 1;
     for (uint32_t eye = 0; eye < pairCount; eye++) {
       if (!create_color_swapchain(xr, session, device, colorInfo, colors[eye]))
             return 1;
@@ -1011,8 +1042,40 @@ int main(int argc, char ** argv)
     if (!create_draw_pipeline(device, pipeline))
       return 1;
 
+    if (unityStage) {
+      uint32_t colorImages = 0;
+      uint32_t depthImages = 0;
+      for (uint32_t eye = 0; eye < pairCount; eye++) {
+        colorImages += static_cast<uint32_t>(colors[eye].images.size());
+        depthImages += static_cast<uint32_t>(depths[eye].images.size());
+      }
+      if (colorImages != 6 || depthImages != 6) {
+        std::fprintf(stderr,
+                     "FAIL: Unity parity requires six color and six depth "
+                     "images, got %u and %u\n",
+                     colorImages, depthImages);
+        return 1;
+      }
+      std::printf("created Unity-style first generation of six color/depth "
+                  "texture pairs\n");
+      for (uint32_t eye = 0; eye < pairCount; eye++) {
+        if (!destroy_depth_swapchain(xr, depths[eye]) ||
+            !destroy_color_swapchain(xr, colors[eye]))
+          return 1;
+      }
+      std::printf("destroyed Unity-style first generation before rendering\n");
+      for (uint32_t eye = 0; eye < pairCount; eye++) {
+        if (!create_color_swapchain(xr, session, device, colorInfo,
+                                    colors[eye]) ||
+            !create_depth_swapchain(xr, session, device, swapchainInfo, true,
+                                    depths[eye]))
+          return 1;
+      }
+      std::printf("recreated Unity-style six color/depth texture pairs\n");
+    }
+
     bool succeeded = false;
-    if (frameStage)
+    if (projectionStage)
       succeeded = run_projection_frame(
           xr, instance, session, device, context, pipeline, colors, depths,
           swapchainInfo.width, swapchainInfo.height);
@@ -1029,7 +1092,10 @@ int main(int argc, char ** argv)
     }
     if (!succeeded)
       return 1;
-    if (frameStage)
+    if (unityStage)
+      std::printf("PASS: Unity-style color/depth rebuild and projection+depth "
+                  "frame completed\n");
+    else if (frameStage)
       std::printf("PASS: stereo color/depth draw and projection+depth "
                   "xrEndFrame completed\n");
     else
