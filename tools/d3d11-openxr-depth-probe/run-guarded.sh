@@ -4,7 +4,7 @@ set -euo pipefail
 stage=${1:-enumerate}
 probe_dir=${2:-/tmp/d3d11-openxr-depth-probe}
 proton_dir=/home/ajg/.config/heroic/tools/proton/GE-Proton10-32
-prefix_dir=/home/ajg/Games/Heroic/Prefixes/MetaHorizon/pfx
+compat_data_dir=/home/ajg/Games/Heroic/Prefixes/MetaHorizon
 umu_run=${UMU_RUN:-}
 
 if [[ -z "$umu_run" ]]; then
@@ -19,14 +19,15 @@ if [[ -z "$umu_run" ]]; then
 fi
 
 case "$stage" in
-  enumerate|views|clear|sample|teardown|recreate|discard|draw|frame) ;;
-  *) echo "usage: $0 [enumerate|views|clear|sample|teardown|recreate|discard|draw|frame] [probe-dir]" >&2; exit 2 ;;
+  bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity) ;;
+  *) echo "usage: $0 [bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity] [probe-dir]" >&2; exit 2 ;;
 esac
 
 case "$stage" in
+  bootstrap) stage_timeout=30s ;;
   enumerate|views|clear|sample) stage_timeout=45s ;;
   teardown|recreate|discard|draw) stage_timeout=60s ;;
-  frame) stage_timeout=90s ;;
+  frame|unity) stage_timeout=90s ;;
 esac
 
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
@@ -40,10 +41,11 @@ set +e
 (
   cd "$probe_dir"
   timeout --kill-after=5s "$stage_timeout" \
-    env WINEPREFIX="$prefix_dir" \
+    env WINEPREFIX="$compat_data_dir" \
         PROTONPATH="$proton_dir" \
         GAMEID=999999999 \
-        UMU_USE_STEAM=1 \
+        UMU_USE_STEAM=0 \
+        PROTON_VERB=run \
         DXVK_LOG_LEVEL=debug \
         "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
 )
@@ -61,6 +63,7 @@ cat "$stdout_log"
 cat "$stderr_log" >&2
 
 case "$stage" in
+  bootstrap) expected='PASS: Proton and Wine VR bootstrap completed' ;;
   enumerate) expected='PASS: create and enumerate only' ;;
   views) expected='PASS: create, enumerate, and OVR-style views' ;;
   clear) expected='PASS: two clear cycles and GPU event fences completed' ;;
@@ -70,6 +73,7 @@ case "$stage" in
   discard) expected='PASS: six depth swapchains destroyed, recreated, discarded/cleared, fenced, and destroyed again' ;;
   draw) expected='PASS: paired color RTV and D32S8 DSV draw completed with an event fence' ;;
   frame) expected='PASS: stereo color/depth draw and projection+depth xrEndFrame completed' ;;
+  unity) expected='PASS: Unity-style color/depth rebuild and projection+depth frame completed' ;;
 esac
 
 if (( status != 0 )); then
