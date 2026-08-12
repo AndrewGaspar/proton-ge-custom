@@ -322,7 +322,7 @@ int main(int argc, char ** argv)
     instanceInfo.applicationInfo.applicationVersion = 1;
     std::strncpy(instanceInfo.applicationInfo.engineName, "none", XR_MAX_ENGINE_NAME_SIZE - 1);
     instanceInfo.applicationInfo.engineVersion = 1;
-    instanceInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+    instanceInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
     instanceInfo.enabledExtensionCount = ARRAYSIZE(extensions);
     instanceInfo.enabledExtensionNames = extensions;
     XrInstance instance = XR_NULL_HANDLE;

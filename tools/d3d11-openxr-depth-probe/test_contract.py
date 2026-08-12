@@ -136,6 +136,7 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn('std::strcmp(stage, "recreate")', probe)
         self.assertIn('d3d11-openxr-depth-probe.stdout.log', probe)
         self.assertIn('d3d11-openxr-depth-probe.stderr.log', probe)
+        self.assertIn('apiVersion = XR_MAKE_VERSION(1, 0, 0);', probe)
 
         runner = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/run-guarded.sh").read_text()
         self.assertIn("expected='PASS: create and enumerate only'", runner)
