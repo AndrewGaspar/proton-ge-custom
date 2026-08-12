@@ -191,6 +191,20 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertNotIn("/tmp/codex-proton", build)
         self.assertIn("-Wpedantic -static", build)
 
+        walkabout_runner = (
+            PROTON_ROOT
+            / "tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh"
+        ).read_text()
+        self.assertIn("ALLOW_LIVE_WALKABOUT", walkabout_runner)
+        self.assertIn("no established WiVRn headset transport", walkabout_runner)
+        self.assertIn("latest presence event does not say the headset is worn", walkabout_runner)
+        self.assertIn("before_xids=", walkabout_runner)
+        self.assertIn("application_name: 'Unity'", walkabout_runner)
+        self.assertIn("Waiting on client fence timed out", walkabout_runner)
+        self.assertIn("SECONDS - unity_connected_at >= 20", walkabout_runner)
+        self.assertIn('WINEPREFIX="$prefix_dir" "$wineserver" -k', walkabout_runner)
+        self.assertIn("exit 99", walkabout_runner)
+
         for usage in (
             "XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL",
             "XRT_SWAPCHAIN_USAGE_SAMPLED",

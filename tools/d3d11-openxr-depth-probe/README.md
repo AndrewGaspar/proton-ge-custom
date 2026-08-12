@@ -8,7 +8,7 @@ swapchain with `DEPTH_STENCIL_ATTACHMENT | SAMPLED` usage.
 Stages are intentionally ordered from lowest risk to highest:
 
 1. `bootstrap`: prove that UMU, Proton, and Wine's volatile VR registry are
-   ready, then exit before loading OpenXR or creating a D3D11 device.
+   ready, then exit before the probe loads OpenXR or creates a D3D11 device.
 2. `enumerate`: create and enumerate the swapchain images, then print the
    D3D11 resource descriptor.
 3. `views`: additionally create the OVR-style typed DSV and depth-plane SRV.
@@ -95,10 +95,11 @@ passes the Meta Proton compatibility-data directory to UMU, not its inner
 selects the existing `pfx` child. The runner does not start, restart, or deploy
 WiVRn or kill any Wine process.
 
-The `bootstrap` stage runs the in-process VR preflight but exits before OpenXR
-or D3D11 initialization. The build links the MinGW runtime statically so the
-target reaches `main()` without relying on undeployed `libstdc++`, `libgcc`, or
-`libwinpthread` DLLs.
+The `bootstrap` stage runs the in-process VR preflight but exits before the
+probe's OpenXR or D3D11 initialization. Proton's VR preflight can still
+initialize its own runtime helpers and enumerate graphics devices. The build
+links the MinGW runtime statically so the target reaches `main()` without
+relying on undeployed `libstdc++`, `libgcc`, or `libwinpthread` DLLs.
 
 The hermetic contract regression does not access a GPU. It checks the resource
 and view format family, the actual-image versus DXVK usage superset, and two
@@ -176,3 +177,32 @@ This is a real GPU test. Do not run it during an attended XR session or while a
 faulted NVIDIA channel is still active. A passing copy/readback establishes the
 local optimal-to-linear primitive only; it does not validate WineOpenXR queue
 ordering, cross-GPU import, or the mixed color/depth failure hypothesis.
+
+## Guarded Walkabout launch
+
+The separate harness validates the active WiVRn service, an established
+headset transport, a latest presence event of "headset is worn", the locally
+built Heroic Meta runner, the installed game, and an idle Walkabout process
+before launch:
+
+```sh
+bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh check
+ALLOW_LIVE_WALKABOUT=1 \
+  bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh run
+```
+
+`run` performs exactly one bounded Heroic protocol launch. It snapshots the
+kernel Xid count, watches for Unity's WiVRn connection and client-fence
+timeouts, stops immediately on either failure, and finally stops only the
+exact Meta prefix with GE-Proton's own wineserver. Logs, the final `Player.log`,
+process snapshots, and a machine-readable classification are retained below
+`${XDG_STATE_HOME:-$HOME/.local/state}/hypxrland/walkabout-d32s8`.
+
+The source-contract test does not need a runtime or GPU. `bootstrap` does not
+need a headset and submits no probe rendering, though Proton's VR preflight may
+initialize runtime helper graphics. Swapchain stages need the real NVIDIA
+client device and WiVRn;
+`frame`, `unity`, and Walkabout additionally need a live focused immersive
+session. A headless Monado compositor can validate API lifecycle and failure
+handling, but it cannot reproduce the NVIDIA Xid because that fault is in the
+proprietary NVIDIA queue executing DXVK's imported-image workload.
