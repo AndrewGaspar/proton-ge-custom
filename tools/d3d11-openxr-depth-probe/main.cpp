@@ -280,7 +280,14 @@ clear_depth_swapchain(const SXrFunctions & xr,
 
 int main(int argc, char ** argv)
 {
+    if (!std::freopen("d3d11-openxr-depth-probe.stdout.log", "w", stdout) ||
+        !std::freopen("d3d11-openxr-depth-probe.stderr.log", "w", stderr))
+        return 3;
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     const char * stage = argc > 1 ? argv[1] : "enumerate";
+    std::printf("probe stage: %s\n", stage);
     if (std::strcmp(stage, "enumerate") != 0 && std::strcmp(stage, "views") != 0 &&
         std::strcmp(stage, "clear") != 0 && std::strcmp(stage, "sample") != 0 &&
         std::strcmp(stage, "teardown") != 0 && std::strcmp(stage, "recreate") != 0 &&

@@ -25,6 +25,10 @@ esac
 
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
 started=$(date --iso-8601=seconds)
+stdout_log="$probe_dir/d3d11-openxr-depth-probe.stdout.log"
+stderr_log="$probe_dir/d3d11-openxr-depth-probe.stderr.log"
+: > "$stdout_log"
+: > "$stderr_log"
 
 set +e
 (
@@ -45,4 +49,26 @@ if (( after > before )); then
   exit 99
 fi
 
-exit "$status"
+cat "$stdout_log"
+cat "$stderr_log" >&2
+
+case "$stage" in
+  enumerate) expected='PASS: create and enumerate only' ;;
+  views) expected='PASS: create, enumerate, and OVR-style views' ;;
+  clear) expected='PASS: two clear cycles and GPU event fences completed' ;;
+  sample) expected='PASS: two clear/sample cycles and GPU event fences completed' ;;
+  teardown) expected='PASS: swapchain teardown drained outstanding D3D11 work; post-destroy fence completed' ;;
+  recreate) expected='PASS: six depth swapchains destroyed, recreated, cleared, fenced, and destroyed again' ;;
+  discard) expected='PASS: six depth swapchains destroyed, recreated, discarded/cleared, fenced, and destroyed again' ;;
+esac
+
+if (( status != 0 )); then
+  echo "FAIL: UMU/Proton returned status $status for stage $stage" >&2
+  exit "$status"
+fi
+if ! grep -Fqx "$expected" "$stdout_log"; then
+  echo "FAIL: stage $stage did not write its expected PASS marker: $expected" >&2
+  exit 1
+fi
+
+exit 0
