@@ -17,6 +17,6 @@ x86_64-w64-mingw32-g++ \
   -I/tmp/codex-proton-d32-xid69/Vulkan-Headers/include \
   "$(dirname "$0")/main.cpp" \
   -o "$out_dir/d3d11-openxr-depth-probe.exe" \
-  -ld3d11 -ld3dcompiler -ldxgi -ldxguid
+  -ladvapi32 -ld3d11 -ld3dcompiler -ldxgi -ldxguid
 
 cp "$loader_dll" "$out_dir/openxr_loader.dll"
