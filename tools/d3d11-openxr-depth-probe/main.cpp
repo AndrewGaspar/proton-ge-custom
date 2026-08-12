@@ -45,6 +45,41 @@ hr_ok(HRESULT result, const char * call)
     return false;
 }
 
+static bool
+wait_for_vr_registry()
+{
+    constexpr ULONGLONG timeoutMs = 15000;
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+
+    do
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\VR", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        {
+            DWORD type = 0;
+            DWORD state = 0;
+            DWORD size = sizeof(state);
+            const LSTATUS status = RegQueryValueExA(key, "state", nullptr, &type,
+                                                    reinterpret_cast<BYTE *>(&state), &size);
+            RegCloseKey(key);
+            if (status == ERROR_SUCCESS && type == REG_DWORD && state == 1)
+            {
+                std::printf("Wine VR registry state: ready\n");
+                return true;
+            }
+            if (status == ERROR_SUCCESS && type == REG_DWORD && state == static_cast<DWORD>(-1))
+            {
+                std::fprintf(stderr, "FAIL: Wine VR registry initialization reported state -1\n");
+                return false;
+            }
+        }
+        Sleep(50);
+    } while (GetTickCount64() < deadline);
+
+    std::fprintf(stderr, "FAIL: Wine VR registry did not reach state 1 within 15 seconds\n");
+    return false;
+}
+
 #define XR_CHECK(CALL)                      \
     do                                      \
     {                                       \
@@ -298,6 +333,9 @@ int main(int argc, char ** argv)
                      argv[0]);
         return 2;
     }
+
+    if (!wait_for_vr_registry())
+        return 1;
 
     HMODULE loader = LoadLibraryA("openxr_loader.dll");
     if (!loader)

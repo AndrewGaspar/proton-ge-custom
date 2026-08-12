@@ -35,7 +35,8 @@ set +e
   cd "$probe_dir"
   WINEPREFIX="$prefix_dir" \
   PROTONPATH="$proton_dir" \
-  GAMEID=0 \
+  GAMEID=999999999 \
+  UMU_USE_STEAM=1 \
   DXVK_LOG_LEVEL=debug \
   "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
 )
@@ -66,7 +67,7 @@ if (( status != 0 )); then
   echo "FAIL: UMU/Proton returned status $status for stage $stage" >&2
   exit "$status"
 fi
-if ! grep -Fqx "$expected" "$stdout_log"; then
+if ! tr -d '\r' < "$stdout_log" | grep -Fqx "$expected"; then
   echo "FAIL: stage $stage did not write its expected PASS marker: $expected" >&2
   exit 1
 fi

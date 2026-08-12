@@ -30,7 +30,8 @@ The guarded runner compares kernel Xid counts before and after every stage and
 returns 99 after any new NVIDIA Xid. It never kills Wine or a wineserver.
 
 ```sh
-bash tools/d3d11-openxr-depth-probe/build.sh
+OPENXR_LOADER_DLL=/path/to/OpenXR-1.1/openxr_loader.dll \
+  bash tools/d3d11-openxr-depth-probe/build.sh
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh enumerate
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh views
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh clear
@@ -48,8 +49,11 @@ restore, release, and reacquire together.
 `teardown`, `recreate`, and `discard` deliberately allocate and destroy real
 runtime images. Do not run them concurrently with another OpenXR application.
 
-The WiVRn runtime must already be running. The runner does not start, restart,
-or deploy any component.
+The WiVRn runtime must already be running. The runner uses UMU's Steam helper
+so Proton initializes its volatile Wine VR registry before the probe starts. It
+uses a nonempty numeric game ID, and the probe waits up to 15 seconds and
+requires `HKCU\\Software\\Wine\\VR` state 1 before loading OpenXR. The runner
+does not start, restart, or deploy WiVRn or kill any Wine process.
 
 The hermetic contract regression does not access a GPU. It checks the resource
 and view format family, the actual-image versus DXVK usage superset, and two
