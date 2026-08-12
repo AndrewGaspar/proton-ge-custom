@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 #include "wineopenxr.h"
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -99,10 +100,19 @@ struct SXrFunctions
     PFN_xrGetInstanceProcAddr getInstanceProcAddr = nullptr;
     PFN_xrCreateInstance createInstance = nullptr;
     PFN_xrDestroyInstance destroyInstance = nullptr;
+    PFN_xrEnumerateInstanceExtensionProperties enumerateExtensions = nullptr;
     PFN_xrGetSystem getSystem = nullptr;
     PFN_xrGetD3D11GraphicsRequirementsKHR getD3D11Requirements = nullptr;
     PFN_xrCreateSession createSession = nullptr;
     PFN_xrDestroySession destroySession = nullptr;
+    PFN_xrPollEvent pollEvent = nullptr;
+    PFN_xrBeginSession beginSession = nullptr;
+    PFN_xrWaitFrame waitFrame = nullptr;
+    PFN_xrBeginFrame beginFrame = nullptr;
+    PFN_xrEndFrame endFrame = nullptr;
+    PFN_xrCreateReferenceSpace createReferenceSpace = nullptr;
+    PFN_xrDestroySpace destroySpace = nullptr;
+    PFN_xrLocateViews locateViews = nullptr;
     PFN_xrEnumerateSwapchainFormats enumerateFormats = nullptr;
     PFN_xrCreateSwapchain createSwapchain = nullptr;
     PFN_xrDestroySwapchain destroySwapchain = nullptr;
@@ -218,6 +228,21 @@ struct SDepthSwapchain
     std::vector<ID3D11ShaderResourceView *> srv;
 };
 
+struct SColorSwapchain
+{
+    XrSwapchain handle = XR_NULL_HANDLE;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    std::vector<XrSwapchainImageD3D11KHR> images;
+    std::vector<ID3D11RenderTargetView *> rtv;
+};
+
+struct SDrawPipeline
+{
+    ID3D11VertexShader * vertexShader = nullptr;
+    ID3D11PixelShader * pixelShader = nullptr;
+    ID3D11DepthStencilState * depthState = nullptr;
+};
+
 static bool
 create_depth_swapchain(const SXrFunctions & xr,
                        XrSession session,
@@ -285,6 +310,377 @@ destroy_depth_swapchain(const SXrFunctions & xr, SDepthSwapchain & depth)
     depth.handle = XR_NULL_HANDLE;
     return xr_ok(result, "xrDestroySwapchain");
 }
+static bool create_color_swapchain(const SXrFunctions &xr, XrSession session,
+                                   ID3D11Device *device,
+                                   const XrSwapchainCreateInfo &createInfo,
+                                   SColorSwapchain &color) {
+  color.format = static_cast<DXGI_FORMAT>(createInfo.format);
+  if (!xr_ok(xr.createSwapchain(session, &createInfo, &color.handle),
+             "xrCreateSwapchain(color)"))
+    return false;
+
+  uint32_t imageCount = 0;
+  if (!xr_ok(xr.enumerateImages(color.handle, 0, &imageCount, nullptr),
+             "xrEnumerateSwapchainImages(color count)"))
+    return false;
+  color.images.assign(
+      imageCount, XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+  if (!xr_ok(xr.enumerateImages(color.handle, imageCount, &imageCount,
+                                reinterpret_cast<XrSwapchainImageBaseHeader *>(
+                                    color.images.data())),
+             "xrEnumerateSwapchainImages(color images)"))
+    return false;
+
+  color.rtv.resize(imageCount);
+  for (uint32_t i = 0; i < imageCount; i++) {
+    D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+    rtvDesc.Format = color.format;
+    rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    if (!hr_ok(device->CreateRenderTargetView(color.images[i].texture, &rtvDesc,
+                                              &color.rtv[i]),
+               "ID3D11Device::CreateRenderTargetView"))
+      return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    color.images[i].texture->GetDesc(&desc);
+    std::printf("color image[%u]: %ux%u mips=%u layers=%u format=%u samples=%u "
+                "bind=0x%x usage=%u misc=0x%x\n",
+                i, desc.Width, desc.Height, desc.MipLevels, desc.ArraySize,
+                static_cast<unsigned>(desc.Format), desc.SampleDesc.Count,
+                desc.BindFlags, desc.Usage, desc.MiscFlags);
+    if (desc.Width != createInfo.width || desc.Height != createInfo.height ||
+        desc.MipLevels != createInfo.mipCount ||
+        desc.ArraySize != createInfo.arraySize ||
+        desc.SampleDesc.Count != createInfo.sampleCount ||
+        desc.Format != color.format ||
+        !(desc.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+      std::fprintf(stderr,
+                   "FAIL: imported color image %u does not match its swapchain "
+                   "contract\n",
+                   i);
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool destroy_color_swapchain(const SXrFunctions &xr,
+                                    SColorSwapchain &color) {
+  for (auto *view : color.rtv)
+    release(view);
+  color.rtv.clear();
+  color.images.clear();
+
+  if (color.handle == XR_NULL_HANDLE)
+    return true;
+  const XrResult result = xr.destroySwapchain(color.handle);
+  color.handle = XR_NULL_HANDLE;
+  return xr_ok(result, "xrDestroySwapchain(color)");
+}
+
+static bool compile_shader(const char *source, const char *entry,
+                           const char *target, ID3DBlob **blob) {
+  ID3DBlob *errors = nullptr;
+  const HRESULT result = D3DCompile(
+      source, std::strlen(source), "mixed-color-depth-draw", nullptr, nullptr,
+      entry, target, D3DCOMPILE_ENABLE_STRICTNESS, 0, blob, &errors);
+  if (errors) {
+    std::fwrite(errors->GetBufferPointer(), 1, errors->GetBufferSize(), stderr);
+    errors->Release();
+  }
+  return hr_ok(result, "D3DCompile");
+}
+
+static bool create_draw_pipeline(ID3D11Device *device,
+                                 SDrawPipeline &pipeline) {
+  static const char vertexSource[] =
+      "float4 main(uint vertex : SV_VertexID) : SV_Position {"
+      "  float2 p[3] = { float2(-1.0, -1.0), float2(-1.0, 3.0), float2(3.0, "
+      "-1.0) };"
+      "  return float4(p[vertex], 0.5, 1.0);"
+      "}";
+  static const char pixelSource[] =
+      "float4 main() : SV_Target { return float4(0.125, 0.5, 0.875, 1.0); }";
+
+  ID3DBlob *vertexBlob = nullptr;
+  ID3DBlob *pixelBlob = nullptr;
+  if (!compile_shader(vertexSource, "main", "vs_5_0", &vertexBlob) ||
+      !compile_shader(pixelSource, "main", "ps_5_0", &pixelBlob)) {
+    release(vertexBlob);
+    release(pixelBlob);
+    return false;
+  }
+  const HRESULT vertexResult = device->CreateVertexShader(
+      vertexBlob->GetBufferPointer(), vertexBlob->GetBufferSize(), nullptr,
+      &pipeline.vertexShader);
+  const HRESULT pixelResult = device->CreatePixelShader(
+      pixelBlob->GetBufferPointer(), pixelBlob->GetBufferSize(), nullptr,
+      &pipeline.pixelShader);
+  release(vertexBlob);
+  release(pixelBlob);
+  if (!hr_ok(vertexResult, "ID3D11Device::CreateVertexShader") ||
+      !hr_ok(pixelResult, "ID3D11Device::CreatePixelShader"))
+    return false;
+
+  D3D11_DEPTH_STENCIL_DESC depthDesc{};
+  depthDesc.DepthEnable = TRUE;
+  depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+  depthDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+  return hr_ok(
+      device->CreateDepthStencilState(&depthDesc, &pipeline.depthState),
+      "ID3D11Device::CreateDepthStencilState");
+}
+
+static void destroy_draw_pipeline(SDrawPipeline &pipeline) {
+  release(pipeline.depthState);
+  release(pipeline.pixelShader);
+  release(pipeline.vertexShader);
+}
+
+static bool acquire_swapchain_image(const SXrFunctions &xr,
+                                    XrSwapchain swapchain,
+                                    uint32_t &imageIndex) {
+  XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  if (!xr_ok(xr.acquireImage(swapchain, &acquireInfo, &imageIndex),
+             "xrAcquireSwapchainImage"))
+    return false;
+  XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  waitInfo.timeout = XR_INFINITE_DURATION;
+  return xr_ok(xr.waitImage(swapchain, &waitInfo), "xrWaitSwapchainImage");
+}
+
+static bool release_swapchain_image(const SXrFunctions &xr,
+                                    XrSwapchain swapchain) {
+  XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  return xr_ok(xr.releaseImage(swapchain, &releaseInfo),
+               "xrReleaseSwapchainImage");
+}
+
+static bool draw_color_depth_pair(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    ID3D11DeviceContext1 *context1, const SDrawPipeline &pipeline,
+    SColorSwapchain &color, SDepthSwapchain &depth, uint32_t width,
+    uint32_t height, bool discard, bool fenceBeforeRelease) {
+  uint32_t colorIndex = 0;
+  uint32_t depthIndex = 0;
+  if (!acquire_swapchain_image(xr, color.handle, colorIndex) ||
+      !acquire_swapchain_image(xr, depth.handle, depthIndex))
+    return false;
+
+  if (discard) {
+    context1->DiscardView(color.rtv[colorIndex]);
+    context1->DiscardView(depth.dsv[depthIndex]);
+  }
+
+  const float clearColor[]{0.0f, 0.0f, 0.0f, 1.0f};
+  context->ClearRenderTargetView(color.rtv[colorIndex], clearColor);
+  context->ClearDepthStencilView(
+      depth.dsv[depthIndex], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+  D3D11_VIEWPORT viewport{};
+  viewport.Width = static_cast<float>(width);
+  viewport.Height = static_cast<float>(height);
+  viewport.MinDepth = 0.0f;
+  viewport.MaxDepth = 1.0f;
+  context->RSSetViewports(1, &viewport);
+  context->OMSetRenderTargets(1, &color.rtv[colorIndex], depth.dsv[depthIndex]);
+  context->OMSetDepthStencilState(pipeline.depthState, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(pipeline.vertexShader, nullptr, 0);
+  context->PSSetShader(pipeline.pixelShader, nullptr, 0);
+  context->Draw(3, 0);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+
+  if (fenceBeforeRelease && !wait_for_gpu(device, context))
+    return false;
+  if (!release_swapchain_image(xr, depth.handle) ||
+      !release_swapchain_image(xr, color.handle))
+    return false;
+
+  std::printf("drew color image %u with depth image %u%s\n", colorIndex,
+              depthIndex,
+              fenceBeforeRelease ? " and completed an event fence" : "");
+  return true;
+}
+
+static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
+                                 XrSession session) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (std::chrono::steady_clock::now() < deadline) {
+    XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
+    const XrResult result = xr.pollEvent(instance, &event);
+    if (result == XR_EVENT_UNAVAILABLE) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+    if (!xr_ok(result, "xrPollEvent"))
+      return false;
+    if (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+      continue;
+
+    const auto &changed =
+        *reinterpret_cast<const XrEventDataSessionStateChanged *>(&event);
+    if (changed.session != session)
+      continue;
+    std::printf("session state changed to %d\n",
+                static_cast<int>(changed.state));
+    if (changed.state == XR_SESSION_STATE_READY) {
+      XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
+      beginInfo.primaryViewConfigurationType =
+          XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+      return xr_ok(xr.beginSession(session, &beginInfo), "xrBeginSession");
+    }
+    if (changed.state == XR_SESSION_STATE_EXITING ||
+        changed.state == XR_SESSION_STATE_LOSS_PENDING) {
+      std::fprintf(stderr,
+                   "FAIL: session entered terminal state %d before READY\n",
+                   static_cast<int>(changed.state));
+      return false;
+    }
+  }
+
+  std::fprintf(stderr, "FAIL: session did not reach READY within 20 seconds\n");
+  return false;
+}
+
+static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
+                                 XrSession session, ID3D11Device *device,
+                                 ID3D11DeviceContext *context,
+                                 const SDrawPipeline &pipeline,
+                                 std::array<SColorSwapchain, 2> &colors,
+                                 std::array<SDepthSwapchain, 2> &depths,
+                                 uint32_t width, uint32_t height) {
+  if (!begin_stereo_session(xr, instance, session))
+    return false;
+
+  XrReferenceSpaceCreateInfo spaceInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+  spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+  spaceInfo.poseInReferenceSpace.orientation.w = 1.0f;
+  XrSpace space = XR_NULL_HANDLE;
+  if (!xr_ok(xr.createReferenceSpace(session, &spaceInfo, &space),
+             "xrCreateReferenceSpace"))
+    return false;
+
+  ID3D11DeviceContext1 *context1 = nullptr;
+  if (!hr_ok(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                                     reinterpret_cast<void **>(&context1)),
+             "ID3D11DeviceContext::QueryInterface(ID3D11DeviceContext1)"))
+    return false;
+
+  bool submitted = false;
+  for (uint32_t attempt = 0; attempt < 120 && !submitted; attempt++) {
+    XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState frameState{XR_TYPE_FRAME_STATE};
+    if (!xr_ok(xr.waitFrame(session, &waitInfo, &frameState), "xrWaitFrame"))
+      return false;
+    XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
+    if (!xr_ok(xr.beginFrame(session, &beginInfo), "xrBeginFrame"))
+      return false;
+
+    if (!frameState.shouldRender) {
+      XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
+      endInfo.displayTime = frameState.predictedDisplayTime;
+      endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+      if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(no layers)"))
+        return false;
+      std::printf("frame attempt %u was not renderable\n", attempt);
+      continue;
+    }
+
+    XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
+    locateInfo.viewConfigurationType =
+        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = frameState.predictedDisplayTime;
+    locateInfo.space = space;
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    std::array<XrView, 2> views{
+        XrView{XR_TYPE_VIEW},
+        XrView{XR_TYPE_VIEW},
+    };
+    uint32_t viewCount = 0;
+    if (!xr_ok(xr.locateViews(session, &locateInfo, &viewState,
+                              static_cast<uint32_t>(views.size()), &viewCount,
+                              views.data()),
+               "xrLocateViews"))
+      return false;
+    constexpr XrViewStateFlags requiredViewFlags =
+        XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+    if (viewCount != views.size() ||
+        (viewState.viewStateFlags & requiredViewFlags) != requiredViewFlags) {
+      std::fprintf(
+          stderr, "FAIL: xrLocateViews returned %u views with flags 0x%llx\n",
+          viewCount, static_cast<unsigned long long>(viewState.viewStateFlags));
+      return false;
+    }
+
+    for (uint32_t eye = 0; eye < 2; eye++) {
+      if (!draw_color_depth_pair(xr, device, context, context1, pipeline,
+                                 colors[eye], depths[eye], width, height, true,
+                                 false))
+        return false;
+    }
+
+    std::array<XrCompositionLayerDepthInfoKHR, 2> depthInfo{
+        XrCompositionLayerDepthInfoKHR{
+            XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+        XrCompositionLayerDepthInfoKHR{
+            XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR},
+    };
+    std::array<XrCompositionLayerProjectionView, 2> projectionViews{
+        XrCompositionLayerProjectionView{
+            XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+        XrCompositionLayerProjectionView{
+            XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+    };
+    for (uint32_t eye = 0; eye < 2; eye++) {
+      depthInfo[eye].subImage.swapchain = depths[eye].handle;
+      depthInfo[eye].subImage.imageRect.extent = {
+          static_cast<int32_t>(width),
+          static_cast<int32_t>(height),
+      };
+      depthInfo[eye].minDepth = 0.0f;
+      depthInfo[eye].maxDepth = 1.0f;
+      depthInfo[eye].nearZ = 0.05f;
+      depthInfo[eye].farZ = 1000.0f;
+
+      projectionViews[eye].next = &depthInfo[eye];
+      projectionViews[eye].pose = views[eye].pose;
+      projectionViews[eye].fov = views[eye].fov;
+      projectionViews[eye].subImage.swapchain = colors[eye].handle;
+      projectionViews[eye].subImage.imageRect.extent = {
+          static_cast<int32_t>(width),
+          static_cast<int32_t>(height),
+      };
+    }
+
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    layer.space = space;
+    layer.viewCount = static_cast<uint32_t>(projectionViews.size());
+    layer.views = projectionViews.data();
+    const XrCompositionLayerBaseHeader *layers[]{
+        reinterpret_cast<const XrCompositionLayerBaseHeader *>(&layer),
+    };
+    XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
+    endInfo.displayTime = frameState.predictedDisplayTime;
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endInfo.layerCount = ARRAYSIZE(layers);
+    endInfo.layers = layers;
+    if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(projection+depth)"))
+      return false;
+    submitted = true;
+    std::printf("submitted two separate-eye color/depth projection views\n");
+  }
+
+  release(context1);
+  xr.destroySpace(space);
+  if (!submitted) {
+    std::fprintf(stderr,
+                 "FAIL: no renderable frame was available in 120 attempts\n");
+    return false;
+  }
+  return wait_for_gpu(device, context);
+}
 
 static bool
 clear_depth_swapchain(const SXrFunctions & xr,
@@ -323,13 +719,17 @@ int main(int argc, char ** argv)
 
     const char * stage = argc > 1 ? argv[1] : "enumerate";
     std::printf("probe stage: %s\n", stage);
-    if (std::strcmp(stage, "enumerate") != 0 && std::strcmp(stage, "views") != 0 &&
-        std::strcmp(stage, "clear") != 0 && std::strcmp(stage, "sample") != 0 &&
-        std::strcmp(stage, "teardown") != 0 && std::strcmp(stage, "recreate") != 0 &&
-        std::strcmp(stage, "discard") != 0)
-    {
-        std::fprintf(stderr,
-                     "usage: %s [enumerate|views|clear|sample|teardown|recreate|discard]\n",
+  if (std::strcmp(stage, "enumerate") != 0 &&
+      std::strcmp(stage, "views") != 0 && std::strcmp(stage, "clear") != 0 &&
+      std::strcmp(stage, "sample") != 0 &&
+      std::strcmp(stage, "teardown") != 0 &&
+      std::strcmp(stage, "recreate") != 0 &&
+      std::strcmp(stage, "discard") != 0 && std::strcmp(stage, "draw") != 0 &&
+      std::strcmp(stage, "frame") != 0) {
+    std::fprintf(
+        stderr,
+        "usage: %s "
+        "[enumerate|views|clear|sample|teardown|recreate|discard|draw|frame]\n",
                      argv[0]);
         return 2;
     }
@@ -338,43 +738,78 @@ int main(int argc, char ** argv)
         return 1;
 
     HMODULE loader = LoadLibraryA("openxr_loader.dll");
-    if (!loader)
-    {
-        std::fprintf(stderr, "FAIL: LoadLibrary(openxr_loader.dll) returned %lu\n", GetLastError());
+  if (!loader) {
+    std::fprintf(stderr, "FAIL: LoadLibrary(openxr_loader.dll) returned %lu\n",
+                 GetLastError());
         return 1;
     }
 
     SXrFunctions xr{};
-    xr.getInstanceProcAddr = reinterpret_cast<PFN_xrGetInstanceProcAddr>(GetProcAddress(loader, "xrGetInstanceProcAddr"));
-    if (!xr.getInstanceProcAddr || !load_xr(xr, XR_NULL_HANDLE, "xrCreateInstance", xr.createInstance))
-    {
+  xr.getInstanceProcAddr = reinterpret_cast<PFN_xrGetInstanceProcAddr>(
+      GetProcAddress(loader, "xrGetInstanceProcAddr"));
+  if (!xr.getInstanceProcAddr ||
+      !load_xr(xr, XR_NULL_HANDLE, "xrCreateInstance", xr.createInstance) ||
+      !load_xr(xr, XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+               xr.enumerateExtensions)) {
         std::fprintf(stderr, "FAIL: OpenXR loader has no global entry points\n");
         return 1;
     }
 
-    const char * extensions[]{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+  const bool frameStage = std::strcmp(stage, "frame") == 0;
+  uint32_t extensionCount = 0;
+  XR_CHECK(xr.enumerateExtensions(nullptr, 0, &extensionCount, nullptr));
+  std::vector<XrExtensionProperties> extensionProperties(
+      extensionCount, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+  XR_CHECK(xr.enumerateExtensions(nullptr, extensionCount, &extensionCount,
+                                  extensionProperties.data()));
+  bool hasDepthComposition = false;
+  for (const auto &extension : extensionProperties)
+    hasDepthComposition |=
+        std::strcmp(extension.extensionName,
+                    XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) == 0;
+  if (frameStage && !hasDepthComposition) {
+    std::fprintf(stderr,
+                 "FAIL: frame stage requires XR_KHR_composition_layer_depth\n");
+    return 1;
+  }
+
+    std::vector<const char *> extensions{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+    if (frameStage)
+        extensions.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(instanceInfo.applicationInfo.applicationName,
-                 "d3d11-openxr-depth-probe",
-                 XR_MAX_APPLICATION_NAME_SIZE - 1);
+               "d3d11-openxr-depth-probe", XR_MAX_APPLICATION_NAME_SIZE - 1);
     instanceInfo.applicationInfo.applicationVersion = 1;
-    std::strncpy(instanceInfo.applicationInfo.engineName, "none", XR_MAX_ENGINE_NAME_SIZE - 1);
+  std::strncpy(instanceInfo.applicationInfo.engineName, "none",
+               XR_MAX_ENGINE_NAME_SIZE - 1);
     instanceInfo.applicationInfo.engineVersion = 1;
     instanceInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-    instanceInfo.enabledExtensionCount = ARRAYSIZE(extensions);
-    instanceInfo.enabledExtensionNames = extensions;
+  instanceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+  instanceInfo.enabledExtensionNames = extensions.data();
     XrInstance instance = XR_NULL_HANDLE;
     XR_CHECK(xr.createInstance(&instanceInfo, &instance));
 
     if (!load_xr(xr, instance, "xrDestroyInstance", xr.destroyInstance) ||
         !load_xr(xr, instance, "xrGetSystem", xr.getSystem) ||
-        !load_xr(xr, instance, "xrGetD3D11GraphicsRequirementsKHR", xr.getD3D11Requirements) ||
+      !load_xr(xr, instance, "xrGetD3D11GraphicsRequirementsKHR",
+               xr.getD3D11Requirements) ||
         !load_xr(xr, instance, "xrCreateSession", xr.createSession) ||
         !load_xr(xr, instance, "xrDestroySession", xr.destroySession) ||
-        !load_xr(xr, instance, "xrEnumerateSwapchainFormats", xr.enumerateFormats) ||
+      !load_xr(xr, instance, "xrPollEvent", xr.pollEvent) ||
+      !load_xr(xr, instance, "xrBeginSession", xr.beginSession) ||
+      !load_xr(xr, instance, "xrWaitFrame", xr.waitFrame) ||
+      !load_xr(xr, instance, "xrBeginFrame", xr.beginFrame) ||
+      !load_xr(xr, instance, "xrEndFrame", xr.endFrame) ||
+      !load_xr(xr, instance, "xrCreateReferenceSpace",
+               xr.createReferenceSpace) ||
+      !load_xr(xr, instance, "xrDestroySpace", xr.destroySpace) ||
+      !load_xr(xr, instance, "xrLocateViews", xr.locateViews) ||
+      !load_xr(xr, instance, "xrEnumerateSwapchainFormats",
+               xr.enumerateFormats) ||
         !load_xr(xr, instance, "xrCreateSwapchain", xr.createSwapchain) ||
         !load_xr(xr, instance, "xrDestroySwapchain", xr.destroySwapchain) ||
-        !load_xr(xr, instance, "xrEnumerateSwapchainImages", xr.enumerateImages) ||
+      !load_xr(xr, instance, "xrEnumerateSwapchainImages",
+               xr.enumerateImages) ||
         !load_xr(xr, instance, "xrAcquireSwapchainImage", xr.acquireImage) ||
         !load_xr(xr, instance, "xrWaitSwapchainImage", xr.waitImage) ||
         !load_xr(xr, instance, "xrReleaseSwapchainImage", xr.releaseImage))
@@ -385,7 +820,8 @@ int main(int argc, char ** argv)
     XrSystemId system = XR_NULL_SYSTEM_ID;
     XR_CHECK(xr.getSystem(instance, &systemInfo, &system));
 
-    XrGraphicsRequirementsD3D11KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
+  XrGraphicsRequirementsD3D11KHR requirements{
+      XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};
     XR_CHECK(xr.getD3D11Requirements(instance, system, &requirements));
     std::printf("runtime adapter LUID=%08lx:%08lx minimum feature level=0x%x\n",
                 static_cast<unsigned long>(requirements.adapterLuid.HighPart),
@@ -408,19 +844,34 @@ int main(int argc, char ** argv)
     uint32_t formatCount = 0;
     XR_CHECK(xr.enumerateFormats(session, 0, &formatCount, nullptr));
     std::vector<int64_t> formats(formatCount);
-    XR_CHECK(xr.enumerateFormats(session, formatCount, &formatCount, formats.data()));
+  XR_CHECK(
+      xr.enumerateFormats(session, formatCount, &formatCount, formats.data()));
     bool hasD32S8 = false;
-    for (const int64_t format: formats)
+  DXGI_FORMAT colorFormat = DXGI_FORMAT_UNKNOWN;
+  for (const int64_t format : formats) {
         hasD32S8 |= format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-    if (!hasD32S8)
-    {
-        std::fprintf(stderr, "FAIL: DXGI_FORMAT_D32_FLOAT_S8X24_UINT is not advertised\n");
+    if (colorFormat == DXGI_FORMAT_UNKNOWN &&
+        format == DXGI_FORMAT_R8G8B8A8_UNORM)
+      colorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+      colorFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+  }
+  if (!hasD32S8) {
+    std::fprintf(stderr,
+                 "FAIL: DXGI_FORMAT_D32_FLOAT_S8X24_UINT is not advertised\n");
+    return 1;
+  }
+  if ((std::strcmp(stage, "draw") == 0 || frameStage) &&
+      colorFormat == DXGI_FORMAT_UNKNOWN) {
+    std::fprintf(
+        stderr,
+        "FAIL: neither RGBA8 UNORM nor RGBA8 SRGB is advertised for color\n");
         return 1;
     }
 
     XrSwapchainCreateInfo swapchainInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-    swapchainInfo.usageFlags =
-        XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+  swapchainInfo.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                             XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
     swapchainInfo.format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     swapchainInfo.sampleCount = 1;
     swapchainInfo.width = 2064;
@@ -430,29 +881,37 @@ int main(int argc, char ** argv)
     swapchainInfo.mipCount = 1;
     const bool createViews = std::strcmp(stage, "enumerate") != 0;
     SDepthSwapchain depth;
-    if (!create_depth_swapchain(xr, session, device, swapchainInfo, createViews, depth))
+  if (!create_depth_swapchain(xr, session, device, swapchainInfo, createViews,
+                              depth))
         return 1;
 
     const uint32_t imageCount = static_cast<uint32_t>(depth.images.size());
     std::printf("enumerated %u D3D11 images\n", imageCount);
-    for (uint32_t i = 0; i < imageCount; i++)
-    {
+  for (uint32_t i = 0; i < imageCount; i++) {
         D3D11_TEXTURE2D_DESC desc{};
         depth.images[i].texture->GetDesc(&desc);
-        std::printf("image[%u]: %ux%u mips=%u layers=%u format=%u samples=%u bind=0x%x usage=%u misc=0x%x\n",
-                    i,
-                    desc.Width,
-                    desc.Height,
-                    desc.MipLevels,
-                    desc.ArraySize,
-                    static_cast<unsigned>(desc.Format),
-                    desc.SampleDesc.Count,
-                    desc.BindFlags,
-                    desc.Usage,
-                    desc.MiscFlags);
+    std::printf("image[%u]: %ux%u mips=%u layers=%u format=%u samples=%u "
+                "bind=0x%x usage=%u misc=0x%x\n",
+                i, desc.Width, desc.Height, desc.MipLevels, desc.ArraySize,
+                static_cast<unsigned>(desc.Format), desc.SampleDesc.Count,
+                desc.BindFlags, desc.Usage, desc.MiscFlags);
+    if (desc.Width != swapchainInfo.width ||
+        desc.Height != swapchainInfo.height ||
+        desc.MipLevels != swapchainInfo.mipCount ||
+        desc.ArraySize != swapchainInfo.arraySize ||
+        desc.SampleDesc.Count != swapchainInfo.sampleCount ||
+        desc.Format != DXGI_FORMAT_R32G8X24_TYPELESS ||
+        (desc.BindFlags &
+         (D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE)) !=
+            (D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE)) {
+      std::fprintf(stderr,
+                   "FAIL: imported depth image %u does not match its swapchain "
+                   "contract\n",
+                   i);
+      return 1;
     }
-    if (std::strcmp(stage, "enumerate") == 0)
-    {
+  }
+  if (std::strcmp(stage, "enumerate") == 0) {
         if (!destroy_depth_swapchain(xr, depth))
             return 1;
         std::printf("PASS: create and enumerate only\n");
@@ -460,24 +919,79 @@ int main(int argc, char ** argv)
     }
 
     std::printf("created typed DSV and depth-plane SRV for all images\n");
-    if (std::strcmp(stage, "views") == 0)
-    {
+  if (std::strcmp(stage, "views") == 0) {
         if (!destroy_depth_swapchain(xr, depth))
             return 1;
         std::printf("PASS: create, enumerate, and OVR-style views\n");
         return 0;
     }
 
-    if (std::strcmp(stage, "teardown") == 0)
-    {
-        if (!clear_depth_swapchain(xr, context, nullptr, depth, false))
+  if (std::strcmp(stage, "draw") == 0 || frameStage) {
+    XrSwapchainCreateInfo colorInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    colorInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                           XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    colorInfo.format = colorFormat;
+    colorInfo.sampleCount = swapchainInfo.sampleCount;
+    colorInfo.width = swapchainInfo.width;
+    colorInfo.height = swapchainInfo.height;
+    colorInfo.faceCount = swapchainInfo.faceCount;
+    colorInfo.arraySize = swapchainInfo.arraySize;
+    colorInfo.mipCount = swapchainInfo.mipCount;
+
+    std::array<SColorSwapchain, 2> colors;
+    std::array<SDepthSwapchain, 2> depths;
+    depths[0] = std::move(depth);
+    const uint32_t pairCount = frameStage ? 2 : 1;
+    for (uint32_t eye = 0; eye < pairCount; eye++) {
+      if (!create_color_swapchain(xr, session, device, colorInfo, colors[eye]))
             return 1;
-        std::printf("released a cleared image; destroying immediately without a probe-side fence\n");
-        if (!destroy_depth_swapchain(xr, depth) || !wait_for_gpu(device, context))
+      if (eye > 0 && !create_depth_swapchain(xr, session, device, swapchainInfo,
+                                             true, depths[eye]))
             return 1;
-        std::printf("PASS: swapchain teardown drained outstanding D3D11 work; post-destroy fence completed\n");
+    }
+
+    SDrawPipeline pipeline;
+    if (!create_draw_pipeline(device, pipeline))
+      return 1;
+
+    bool succeeded = false;
+    if (frameStage)
+      succeeded = run_projection_frame(
+          xr, instance, session, device, context, pipeline, colors, depths,
+          swapchainInfo.width, swapchainInfo.height);
+    else
+      succeeded = draw_color_depth_pair(
+          xr, device, context, nullptr, pipeline, colors[0], depths[0],
+          swapchainInfo.width, swapchainInfo.height, false, true);
+
+    destroy_draw_pipeline(pipeline);
+    for (uint32_t eye = 0; eye < pairCount; eye++) {
+      if (!destroy_depth_swapchain(xr, depths[eye]) ||
+          !destroy_color_swapchain(xr, colors[eye]))
+        return 1;
+    }
+    if (!succeeded)
+      return 1;
+    if (frameStage)
+      std::printf("PASS: stereo color/depth draw and projection+depth "
+                  "xrEndFrame completed\n");
+    else
+      std::printf("PASS: paired color RTV and D32S8 DSV draw completed with an "
+                  "event fence\n");
         return 0;
     }
+
+  if (std::strcmp(stage, "teardown") == 0) {
+    if (!clear_depth_swapchain(xr, context, nullptr, depth, false))
+      return 1;
+    std::printf("released a cleared image; destroying immediately without a "
+                "probe-side fence\n");
+    if (!destroy_depth_swapchain(xr, depth) || !wait_for_gpu(device, context))
+      return 1;
+    std::printf("PASS: swapchain teardown drained outstanding D3D11 work; "
+                "post-destroy fence completed\n");
+    return 0;
+  }
 
     if (std::strcmp(stage, "recreate") == 0 || std::strcmp(stage, "discard") == 0)
     {
