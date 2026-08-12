@@ -980,6 +980,8 @@ XrResult WINAPI xrCreateSwapchain(XrSession session, const XrSwapchainCreateInfo
 
   TRACE("%p, %p, %p\n", session, createInfo, swapchain);
 
+  *swapchain = XR_NULL_HANDLE;
+
   if (wine_session->session_type == SESSION_TYPE_D3D11 || wine_session->session_type == SESSION_TYPE_D3D12) {
     BOOL format_is_depth;
     our_createInfo.format = map_format_dxgi_to_vulkan(createInfo->format);
@@ -1143,8 +1145,8 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                                            uint32_t imageCapacityInput,
                                            uint32_t *imageCountOutput,
                                            XrSwapchainImageBaseHeader *images) {
-  wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
-  wine_XrInstance *wine_instance = wine_swapchain->session->instance;
+  wine_XrSwapchain *wine_swapchain;
+  wine_XrInstance *wine_instance;
   XrSwapchainImageVulkanKHR *our_vk;
   HRESULT hr;
   size_t image_size = 0;
@@ -1158,6 +1160,13 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
   NTSTATUS _status;
 
   TRACE("%p, %u, %p, %p\n", swapchain, imageCapacityInput, imageCountOutput, images);
+  if (swapchain == XR_NULL_HANDLE) {
+    WARN("xrEnumerateSwapchainImages called with XR_NULL_HANDLE\n");
+    return XR_ERROR_HANDLE_INVALID;
+  }
+
+  wine_swapchain = wine_swapchain_from_handle(swapchain);
+  wine_instance = wine_swapchain->session->instance;
   if (wine_swapchain->session->session_type != SESSION_TYPE_D3D11 &&
       wine_swapchain->session->session_type != SESSION_TYPE_D3D12) {
     _status = UNIX_CALL(xrEnumerateSwapchainImages, &params);

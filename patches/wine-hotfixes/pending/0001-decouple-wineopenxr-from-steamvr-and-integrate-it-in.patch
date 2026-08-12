@@ -14,7 +14,7 @@ Subject: [PATCH] decouple wineopenxr from steamvr and integrate it into wine
  dlls/wineopenxr/loader_thunks.h        | 3517 +++++++++
  dlls/wineopenxr/make_openxr            | 3584 +++++++++
  dlls/wineopenxr/openxr.c               |  464 ++
- dlls/wineopenxr/openxr_loader.c        | 2238 ++++++
+ dlls/wineopenxr/openxr_loader.c        | 2247 ++++++
  dlls/wineopenxr/openxr_loader.h        |  127 +
  dlls/wineopenxr/openxr_private.h       |   60 +
  dlls/wineopenxr/openxr_thunks.c        | 5448 ++++++++++++++
@@ -25,7 +25,7 @@ Subject: [PATCH] decouple wineopenxr from steamvr and integrate it into wine
  dlls/wineopenxr/wineopenxr.spec        |    7 +
  dlls/wineopenxr/wineopenxr64.json      |    6 +
  loader/wine.inf.in                     |    1 +
- 20 files changed, 31235 insertions(+)
+ 20 files changed, 31244 insertions(+)
  create mode 100644 dlls/wineopenxr/Makefile.in
  create mode 100644 dlls/wineopenxr/dxvk-interop.h
  create mode 100644 dlls/wineopenxr/loader_structs.h
@@ -13048,7 +13048,7 @@ new file mode 100644
 index 00000000000..35a64e22dc9
 --- /dev/null
 +++ b/dlls/wineopenxr/openxr_loader.c
-@@ -0,0 +1,2238 @@
+@@ -0,0 +1,2247 @@
 +#include <stdlib.h>
 +#include <string.h>
 +#include <stdio.h>
@@ -14176,6 +14176,8 @@ index 00000000000..35a64e22dc9
 +
 +  TRACE("%p, %p, %p\n", session, createInfo, swapchain);
 +
++  *swapchain = XR_NULL_HANDLE;
++
 +  if (wine_session->session_type == SESSION_TYPE_D3D11 || wine_session->session_type == SESSION_TYPE_D3D12) {
 +    BOOL format_is_depth;
 +    our_createInfo.format = map_format_dxgi_to_vulkan(createInfo->format);
@@ -14339,8 +14341,8 @@ index 00000000000..35a64e22dc9
 +                                           uint32_t imageCapacityInput,
 +                                           uint32_t *imageCountOutput,
 +                                           XrSwapchainImageBaseHeader *images) {
-+  wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
-+  wine_XrInstance *wine_instance = wine_swapchain->session->instance;
++  wine_XrSwapchain *wine_swapchain;
++  wine_XrInstance *wine_instance;
 +  XrSwapchainImageVulkanKHR *our_vk;
 +  HRESULT hr;
 +  size_t image_size = 0;
@@ -14354,6 +14356,13 @@ index 00000000000..35a64e22dc9
 +  NTSTATUS _status;
 +
 +  TRACE("%p, %u, %p, %p\n", swapchain, imageCapacityInput, imageCountOutput, images);
++  if (swapchain == XR_NULL_HANDLE) {
++    WARN("xrEnumerateSwapchainImages called with XR_NULL_HANDLE\n");
++    return XR_ERROR_HANDLE_INVALID;
++  }
++
++  wine_swapchain = wine_swapchain_from_handle(swapchain);
++  wine_instance = wine_swapchain->session->instance;
 +  if (wine_swapchain->session->session_type != SESSION_TYPE_D3D11 &&
 +      wine_swapchain->session->session_type != SESSION_TYPE_D3D12) {
 +    _status = UNIX_CALL(xrEnumerateSwapchainImages, &params);
@@ -31423,4 +31432,3 @@ index 1b822ad1eab..9fe8a5f5656 100644
  55,,winprint.dll,1
 -- 
 2.53.0
-
