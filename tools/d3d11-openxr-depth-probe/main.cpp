@@ -353,7 +353,9 @@ static bool create_color_swapchain(const SXrFunctions &xr, XrSession session,
         desc.ArraySize != createInfo.arraySize ||
         desc.SampleDesc.Count != createInfo.sampleCount ||
         desc.Format != color.format ||
-        !(desc.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+        (desc.BindFlags &
+         (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) !=
+            (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE)) {
       std::fprintf(stderr,
                    "FAIL: imported color image %u does not match its swapchain "
                    "contract\n",
@@ -439,11 +441,13 @@ static void destroy_draw_pipeline(SDrawPipeline &pipeline) {
 
 static bool acquire_swapchain_image(const SXrFunctions &xr,
                                     XrSwapchain swapchain,
-                                    uint32_t &imageIndex) {
+                                    uint32_t &imageIndex, bool &acquired) {
+  acquired = false;
   XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
   if (!xr_ok(xr.acquireImage(swapchain, &acquireInfo, &imageIndex),
              "xrAcquireSwapchainImage"))
     return false;
+  acquired = true;
   XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
   waitInfo.timeout = XR_INFINITE_DURATION;
   return xr_ok(xr.waitImage(swapchain, &waitInfo), "xrWaitSwapchainImage");
@@ -463,9 +467,20 @@ static bool draw_color_depth_pair(
     uint32_t height, bool discard, bool fenceBeforeRelease) {
   uint32_t colorIndex = 0;
   uint32_t depthIndex = 0;
-  if (!acquire_swapchain_image(xr, color.handle, colorIndex) ||
-      !acquire_swapchain_image(xr, depth.handle, depthIndex))
+  bool colorAcquired = false;
+  bool depthAcquired = false;
+  if (!acquire_swapchain_image(xr, color.handle, colorIndex, colorAcquired)) {
+    if (colorAcquired)
+      release_swapchain_image(xr, color.handle);
     return false;
+  }
+  if (!acquire_swapchain_image(xr, depth.handle, depthIndex, depthAcquired)) {
+    if (depthAcquired)
+      release_swapchain_image(xr, depth.handle);
+    if (colorAcquired)
+      release_swapchain_image(xr, color.handle);
+    return false;
+  }
 
   if (discard) {
     context1->DiscardView(color.rtv[colorIndex]);
@@ -491,10 +506,10 @@ static bool draw_color_depth_pair(
   context->Draw(3, 0);
   context->OMSetRenderTargets(0, nullptr, nullptr);
 
-  if (fenceBeforeRelease && !wait_for_gpu(device, context))
-    return false;
-  if (!release_swapchain_image(xr, depth.handle) ||
-      !release_swapchain_image(xr, color.handle))
+  const bool fenceOk = !fenceBeforeRelease || wait_for_gpu(device, context);
+  const bool depthReleaseOk = release_swapchain_image(xr, depth.handle);
+  const bool colorReleaseOk = release_swapchain_image(xr, color.handle);
+  if (!fenceOk || !depthReleaseOk || !colorReleaseOk)
     return false;
 
   std::printf("drew color image %u with depth image %u%s\n", colorIndex,
@@ -544,6 +559,30 @@ static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
   return false;
 }
 
+static bool end_aborted_frame(const SXrFunctions &xr, XrSession session,
+                              XrTime displayTime, const char *reason) {
+  std::fprintf(stderr,
+               "frame stage abort after xrBeginFrame: %s; attempting an empty "
+               "xrEndFrame\n",
+               reason);
+  XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
+  endInfo.displayTime = displayTime;
+  endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+  xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(abort recovery)");
+  return false;
+}
+
+static bool cleanup_projection_resources(const SXrFunctions &xr, XrSpace &space,
+                                         ID3D11DeviceContext1 *&context1,
+                                         bool result) {
+  release(context1);
+  if (space != XR_NULL_HANDLE) {
+    xr_ok(xr.destroySpace(space), "xrDestroySpace");
+    space = XR_NULL_HANDLE;
+  }
+  return result;
+}
+
 static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
                                  XrSession session, ID3D11Device *device,
                                  ID3D11DeviceContext *context,
@@ -566,24 +605,30 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
   if (!hr_ok(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
                                      reinterpret_cast<void **>(&context1)),
              "ID3D11DeviceContext::QueryInterface(ID3D11DeviceContext1)"))
-    return false;
+    return cleanup_projection_resources(xr, space, context1, false);
 
-  bool submitted = false;
-  for (uint32_t attempt = 0; attempt < 120 && !submitted; attempt++) {
+  constexpr uint32_t maxFrameAttempts = 120;
+  const auto frameDeadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  uint32_t renderedFrames = 0;
+  for (uint32_t attempt = 0;
+       attempt < maxFrameAttempts &&
+       std::chrono::steady_clock::now() < frameDeadline;
+       attempt++) {
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     if (!xr_ok(xr.waitFrame(session, &waitInfo, &frameState), "xrWaitFrame"))
-      return false;
+      return cleanup_projection_resources(xr, space, context1, false);
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     if (!xr_ok(xr.beginFrame(session, &beginInfo), "xrBeginFrame"))
-      return false;
+      return cleanup_projection_resources(xr, space, context1, false);
 
     if (!frameState.shouldRender) {
       XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
       endInfo.displayTime = frameState.predictedDisplayTime;
       endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
       if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(no layers)"))
-        return false;
+        return cleanup_projection_resources(xr, space, context1, false);
       std::printf("frame attempt %u was not renderable\n", attempt);
       continue;
     }
@@ -599,11 +644,15 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
         XrView{XR_TYPE_VIEW},
     };
     uint32_t viewCount = 0;
-    if (!xr_ok(xr.locateViews(session, &locateInfo, &viewState,
-                              static_cast<uint32_t>(views.size()), &viewCount,
-                              views.data()),
-               "xrLocateViews"))
-      return false;
+    const XrResult locateResult =
+        xr.locateViews(session, &locateInfo, &viewState,
+                       static_cast<uint32_t>(views.size()), &viewCount,
+                       views.data());
+    if (!xr_ok(locateResult, "xrLocateViews")) {
+      end_aborted_frame(xr, session, frameState.predictedDisplayTime,
+                        "xrLocateViews failed");
+      return cleanup_projection_resources(xr, space, context1, false);
+    }
     constexpr XrViewStateFlags requiredViewFlags =
         XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
     if (viewCount != views.size() ||
@@ -611,14 +660,19 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
       std::fprintf(
           stderr, "FAIL: xrLocateViews returned %u views with flags 0x%llx\n",
           viewCount, static_cast<unsigned long long>(viewState.viewStateFlags));
-      return false;
+      end_aborted_frame(xr, session, frameState.predictedDisplayTime,
+                        "xrLocateViews returned invalid stereo views");
+      return cleanup_projection_resources(xr, space, context1, false);
     }
 
     for (uint32_t eye = 0; eye < 2; eye++) {
       if (!draw_color_depth_pair(xr, device, context, context1, pipeline,
                                  colors[eye], depths[eye], width, height, true,
-                                 false))
-        return false;
+                                 false)) {
+        end_aborted_frame(xr, session, frameState.predictedDisplayTime,
+                          "paired color/depth draw failed");
+        return cleanup_projection_resources(xr, space, context1, false);
+      }
     }
 
     std::array<XrCompositionLayerDepthInfoKHR, 2> depthInfo{
@@ -667,19 +721,22 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
     endInfo.layerCount = ARRAYSIZE(layers);
     endInfo.layers = layers;
     if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(projection+depth)"))
-      return false;
-    submitted = true;
-    std::printf("submitted two separate-eye color/depth projection views\n");
+      return cleanup_projection_resources(xr, space, context1, false);
+    renderedFrames++;
+    std::printf("submitted stereo color/depth projection frame %u\n",
+                renderedFrames);
   }
 
-  release(context1);
-  xr.destroySpace(space);
-  if (!submitted) {
+  if (!renderedFrames) {
     std::fprintf(stderr,
-                 "FAIL: no renderable frame was available in 120 attempts\n");
-    return false;
+                 "FAIL: no renderable frame was available within %u attempts "
+                 "or three seconds\n",
+                 maxFrameAttempts);
+    return cleanup_projection_resources(xr, space, context1, false);
   }
-  return wait_for_gpu(device, context);
+  std::printf("completed %u rendered projection frames\n", renderedFrames);
+  const bool gpuOk = wait_for_gpu(device, context);
+  return cleanup_projection_resources(xr, space, context1, gpuOk);
 }
 
 static bool

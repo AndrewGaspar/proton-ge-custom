@@ -23,6 +23,12 @@ case "$stage" in
   *) echo "usage: $0 [enumerate|views|clear|sample|teardown|recreate|discard|draw|frame] [probe-dir]" >&2; exit 2 ;;
 esac
 
+case "$stage" in
+  enumerate|views|clear|sample) stage_timeout=45s ;;
+  teardown|recreate|discard|draw) stage_timeout=60s ;;
+  frame) stage_timeout=90s ;;
+esac
+
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
 started=$(date --iso-8601=seconds)
 stdout_log="$probe_dir/d3d11-openxr-depth-probe.stdout.log"
@@ -33,12 +39,13 @@ stderr_log="$probe_dir/d3d11-openxr-depth-probe.stderr.log"
 set +e
 (
   cd "$probe_dir"
-  WINEPREFIX="$prefix_dir" \
-  PROTONPATH="$proton_dir" \
-  GAMEID=999999999 \
-  UMU_USE_STEAM=1 \
-  DXVK_LOG_LEVEL=debug \
-  "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
+  timeout --kill-after=5s "$stage_timeout" \
+    env WINEPREFIX="$prefix_dir" \
+        PROTONPATH="$proton_dir" \
+        GAMEID=999999999 \
+        UMU_USE_STEAM=1 \
+        DXVK_LOG_LEVEL=debug \
+        "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
 )
 status=$?
 set -e

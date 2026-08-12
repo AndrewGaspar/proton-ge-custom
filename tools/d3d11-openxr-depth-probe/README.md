@@ -34,11 +34,14 @@ Stages are intentionally ordered from lowest risk to highest:
 9. `frame`: begin an active stereo OpenXR session, create separate color/depth
    pairs for both eyes, discard/clear/draw each pair without an application
    fence before release, and submit them through `xrEndFrame` as a projection
-   layer with `XrCompositionLayerDepthInfoKHR` chains. It then verifies that a
-   post-submit D3D11 event fence completes.
+   layer with `XrCompositionLayerDepthInfoKHR` chains for up to three seconds
+   (at most 120 attempts). It then verifies that a post-submit D3D11 event fence
+   completes.
 
 The guarded runner compares kernel Xid counts before and after every stage and
-returns 99 after any new NVIDIA Xid. It never kills Wine or a wineserver.
+returns 99 after any new NVIDIA Xid. Each stage also has a bounded timeout that
+terminates only the probe's UMU process group; the post-run Xid check still runs
+after a timeout. It never broadly kills Wine or a wineserver.
 
 ```sh
 OPENXR_LOADER_DLL=/path/to/OpenXR-1.1/openxr_loader.dll \
