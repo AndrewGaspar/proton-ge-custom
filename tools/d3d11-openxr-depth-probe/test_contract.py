@@ -137,10 +137,20 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn('d3d11-openxr-depth-probe.stdout.log', probe)
         self.assertIn('d3d11-openxr-depth-probe.stderr.log', probe)
         self.assertIn('apiVersion = XR_MAKE_VERSION(1, 0, 0);', probe)
+        self.assertIn('RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\\\Wine\\\\VR"', probe)
+        self.assertIn('state == 1', probe)
+        self.assertIn('Wine VR registry did not reach state 1', probe)
 
         runner = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/run-guarded.sh").read_text()
         self.assertIn("expected='PASS: create and enumerate only'", runner)
-        self.assertIn('grep -Fqx "$expected" "$stdout_log"', runner)
+        self.assertIn("UMU_USE_STEAM=1", runner)
+        self.assertIn("GAMEID=999999999", runner)
+        self.assertIn("tr -d '\\r'", runner)
+        self.assertIn('grep -Fqx "$expected"', runner)
+
+        build = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/build.sh").read_text()
+        self.assertIn("OPENXR_LOADER_DLL", build)
+        self.assertNotIn("BONELAB", build)
 
         for usage in (
             "XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL",
