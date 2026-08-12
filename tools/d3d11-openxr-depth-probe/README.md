@@ -25,6 +25,17 @@ Stages are intentionally ordered from lowest risk to highest:
 7. `discard`: run `recreate`, but call `ID3D11DeviceContext1::DiscardView` on
    every acquired DSV before clearing it. This covers Oculus XR Plugin's
    `Optimize Buffer Discards: Yes` path separately.
+8. `draw`: create a real cross-GPU RGBA8 color swapchain alongside D32S8,
+   validate both imported D3D11 resource descriptors, bind a typed RTV and DSV,
+   clear them, execute a depth-writing VS/PS draw, complete an event-query
+   fence, and release both images. This is the first stage that puts the
+   cross-GPU color image and client-local depth image in one graphics render
+   pass.
+9. `frame`: begin an active stereo OpenXR session, create separate color/depth
+   pairs for both eyes, discard/clear/draw each pair without an application
+   fence before release, and submit them through `xrEndFrame` as a projection
+   layer with `XrCompositionLayerDepthInfoKHR` chains. It then verifies that a
+   post-submit D3D11 event fence completes.
 
 The guarded runner compares kernel Xid counts before and after every stage and
 returns 99 after any new NVIDIA Xid. It never kills Wine or a wineserver.
@@ -39,6 +50,8 @@ bash tools/d3d11-openxr-depth-probe/run-guarded.sh sample
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh teardown
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh recreate
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh discard
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh frame
 ```
 
 Run the stages in that order and stop after any failure or exit 99. `enumerate`
@@ -46,8 +59,9 @@ must report resource format 19 (`DXGI_FORMAT_R32G8X24_TYPELESS`). `sample` is
 the first stage that exercises DSV write, SRV transition, readback, command-list
 restore, release, and reacquire together.
 
-`teardown`, `recreate`, and `discard` deliberately allocate and destroy real
-runtime images. Do not run them concurrently with another OpenXR application.
+`teardown` and every later stage deliberately allocate and destroy real runtime
+images. `frame` also takes over the active immersive session and submits visible
+color. Do not run any of them concurrently with another OpenXR application.
 
 The WiVRn runtime must already be running. The runner uses UMU's Steam helper
 so Proton initializes its volatile Wine VR registry before the probe starts. It
