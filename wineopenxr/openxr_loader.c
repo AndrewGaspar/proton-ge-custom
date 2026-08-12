@@ -599,7 +599,6 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
 
         wine_instance->dxvk_device->lpVtbl->GetVulkanHandles(wine_instance->dxvk_device, &our_vk_binding.instance,
                                                              &our_vk_binding.physicalDevice, &our_vk_binding.device);
-
         wine_instance->dxvk_device->lpVtbl->GetSubmissionQueue2(
             wine_instance->dxvk_device, NULL, &our_vk_binding.queueIndex, &our_vk_binding.queueFamilyIndex);
 
@@ -693,6 +692,7 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
 
   wine_session->instance = wine_instance;
   wine_session->session_type = session_type;
+  InitializeCriticalSection(&wine_session->swapchain_destroy_lock);
 
   EnterCriticalSection(&session_list_lock);
 
@@ -718,6 +718,7 @@ XrResult WINAPI xrDestroySession(XrSession session) {
     return params.result;
   }
 
+  DeleteCriticalSection(&wine_session->swapchain_destroy_lock);
   free(wine_session);
   return XR_SUCCESS;
 }
@@ -1055,12 +1056,44 @@ static void release_d3d12_resources(wine_XrSwapchain *swapchain, uint32_t image_
   free(swapchain->acquired_indices);
 }
 
+static void release_d3d11_resources(wine_XrSwapchain *swapchain) {
+  XrSwapchainImageD3D11KHR *d3d11_images = (XrSwapchainImageD3D11KHR *)swapchain->images;
+  UINT i;
+
+  for (i = 0; i < swapchain->image_count; i++) {
+    d3d11_images[i].texture->lpVtbl->Release(d3d11_images[i].texture);
+  }
+
+  free(swapchain->images);
+  swapchain->images = NULL;
+  swapchain->image_count = 0;
+}
+
 XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain) {
   wine_XrSwapchain *wine_swapchain = wine_swapchain_from_handle(swapchain);
+  wine_XrInstance *wine_instance = wine_swapchain->session->instance;
   struct xrDestroySwapchain_params params = {.swapchain = swapchain};
   NTSTATUS _status;
 
   TRACE("%p\n", swapchain);
+
+  if (wine_swapchain->session->session_type == SESSION_TYPE_D3D11 && wine_swapchain->image_count) {
+    /*
+     * DXVK wraps Vulkan images owned by the host OpenXR runtime.  Destroying
+     * the host swapchain first invalidates those VkImages while DXVK can still
+     * own VkImageViews and deferred command-list references to them.  Unity's
+     * Oculus plugin destroys and immediately recreates its eye swapchains,
+     * which makes that invalid lifetime visible to the next GPU submission.
+     *
+     * Drain DXVK's command stream, submission and finish queues, and GPU work.
+     * The newer interop interface makes this one operation so no deferred CPU
+     * reference can outlive the borrowed image.
+     */
+    EnterCriticalSection(&wine_swapchain->session->swapchain_destroy_lock);
+    wine_instance->dxvk_device->lpVtbl->WaitForGpuIdle(wine_instance->dxvk_device);
+    LeaveCriticalSection(&wine_swapchain->session->swapchain_destroy_lock);
+    release_d3d11_resources(wine_swapchain);
+  }
 
   _status = UNIX_CALL(xrDestroySwapchain, &params);
   assert(!_status && "xrDestroySwapchain");
@@ -1070,13 +1103,7 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain) {
   }
 
   if (wine_swapchain->image_count) {
-    UINT i;
-    if (wine_swapchain->session->session_type == SESSION_TYPE_D3D11) {
-      XrSwapchainImageD3D11KHR *d3d11_images = (XrSwapchainImageD3D11KHR *)wine_swapchain->images;
-      for (i = 0; i < wine_swapchain->image_count; i++) {
-        d3d11_images[i].texture->lpVtbl->Release(d3d11_images[i].texture);
-      }
-    } else if (wine_swapchain->session->session_type == SESSION_TYPE_D3D12) {
+    if (wine_swapchain->session->session_type == SESSION_TYPE_D3D12) {
       release_d3d12_resources(wine_swapchain, wine_swapchain->image_count);
     }
     free(wine_swapchain->images);

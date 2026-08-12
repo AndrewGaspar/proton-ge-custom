@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <utility>
 #include <vector>
 
 template <typename T>
@@ -173,13 +175,120 @@ wait_for_gpu(ID3D11Device * device, ID3D11DeviceContext * context)
     return hr_ok(result, "ID3D11DeviceContext::GetData");
 }
 
+struct SDepthSwapchain
+{
+    XrSwapchain handle = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageD3D11KHR> images;
+    std::vector<ID3D11DepthStencilView *> dsv;
+    std::vector<ID3D11ShaderResourceView *> srv;
+};
+
+static bool
+create_depth_swapchain(const SXrFunctions & xr,
+                       XrSession session,
+                       ID3D11Device * device,
+                       const XrSwapchainCreateInfo & createInfo,
+                       bool createViews,
+                       SDepthSwapchain & depth)
+{
+    if (!xr_ok(xr.createSwapchain(session, &createInfo, &depth.handle), "xrCreateSwapchain"))
+        return false;
+
+    uint32_t imageCount = 0;
+    if (!xr_ok(xr.enumerateImages(depth.handle, 0, &imageCount, nullptr),
+               "xrEnumerateSwapchainImages(count)"))
+        return false;
+    depth.images.assign(imageCount,
+                        XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
+    if (!xr_ok(xr.enumerateImages(depth.handle,
+                                  imageCount,
+                                  &imageCount,
+                                  reinterpret_cast<XrSwapchainImageBaseHeader *>(depth.images.data())),
+               "xrEnumerateSwapchainImages(images)"))
+        return false;
+
+    if (!createViews)
+        return true;
+
+    depth.dsv.resize(imageCount);
+    depth.srv.resize(imageCount);
+    for (uint32_t i = 0; i < imageCount; i++)
+    {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        if (!hr_ok(device->CreateDepthStencilView(depth.images[i].texture, &dsvDesc, &depth.dsv[i]),
+                   "ID3D11Device::CreateDepthStencilView"))
+            return false;
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+        if (!hr_ok(device->CreateShaderResourceView(depth.images[i].texture, &srvDesc, &depth.srv[i]),
+                   "ID3D11Device::CreateShaderResourceView"))
+            return false;
+    }
+    return true;
+}
+
+static bool
+destroy_depth_swapchain(const SXrFunctions & xr, SDepthSwapchain & depth)
+{
+    for (auto * view: depth.srv)
+        release(view);
+    for (auto * view: depth.dsv)
+        release(view);
+    depth.srv.clear();
+    depth.dsv.clear();
+    depth.images.clear();
+
+    if (depth.handle == XR_NULL_HANDLE)
+        return true;
+    const XrResult result = xr.destroySwapchain(depth.handle);
+    depth.handle = XR_NULL_HANDLE;
+    return xr_ok(result, "xrDestroySwapchain");
+}
+
+static bool
+clear_depth_swapchain(const SXrFunctions & xr,
+                      ID3D11DeviceContext * context,
+                      ID3D11DeviceContext1 * context1,
+                      SDepthSwapchain & depth,
+                      bool discard)
+{
+    uint32_t imageIndex = 0;
+    XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (!xr_ok(xr.acquireImage(depth.handle, &acquireInfo, &imageIndex), "xrAcquireSwapchainImage"))
+        return false;
+    XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = XR_INFINITE_DURATION;
+    if (!xr_ok(xr.waitImage(depth.handle, &waitInfo), "xrWaitSwapchainImage"))
+        return false;
+
+    if (discard)
+        context1->DiscardView(depth.dsv[imageIndex]);
+    context->ClearDepthStencilView(depth.dsv[imageIndex],
+                                   D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
+                                   0.5f,
+                                   0x5a);
+
+    XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    return xr_ok(xr.releaseImage(depth.handle, &releaseInfo), "xrReleaseSwapchainImage");
+}
+
 int main(int argc, char ** argv)
 {
     const char * stage = argc > 1 ? argv[1] : "enumerate";
     if (std::strcmp(stage, "enumerate") != 0 && std::strcmp(stage, "views") != 0 &&
-        std::strcmp(stage, "clear") != 0 && std::strcmp(stage, "sample") != 0)
+        std::strcmp(stage, "clear") != 0 && std::strcmp(stage, "sample") != 0 &&
+        std::strcmp(stage, "teardown") != 0 && std::strcmp(stage, "recreate") != 0 &&
+        std::strcmp(stage, "discard") != 0)
     {
-        std::fprintf(stderr, "usage: %s [enumerate|views|clear|sample]\n", argv[0]);
+        std::fprintf(stderr,
+                     "usage: %s [enumerate|views|clear|sample|teardown|recreate|discard]\n",
+                     argv[0]);
         return 2;
     }
 
@@ -274,22 +383,17 @@ int main(int argc, char ** argv)
     swapchainInfo.faceCount = 1;
     swapchainInfo.arraySize = 1;
     swapchainInfo.mipCount = 1;
-    XrSwapchain swapchain = XR_NULL_HANDLE;
-    XR_CHECK(xr.createSwapchain(session, &swapchainInfo, &swapchain));
+    const bool createViews = std::strcmp(stage, "enumerate") != 0;
+    SDepthSwapchain depth;
+    if (!create_depth_swapchain(xr, session, device, swapchainInfo, createViews, depth))
+        return 1;
 
-    uint32_t imageCount = 0;
-    XR_CHECK(xr.enumerateImages(swapchain, 0, &imageCount, nullptr));
-    std::vector<XrSwapchainImageD3D11KHR> images(imageCount,
-                                                 XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR});
-    XR_CHECK(xr.enumerateImages(swapchain,
-                                imageCount,
-                                &imageCount,
-                                reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())));
+    const uint32_t imageCount = static_cast<uint32_t>(depth.images.size());
     std::printf("enumerated %u D3D11 images\n", imageCount);
     for (uint32_t i = 0; i < imageCount; i++)
     {
         D3D11_TEXTURE2D_DESC desc{};
-        images[i].texture->GetDesc(&desc);
+        depth.images[i].texture->GetDesc(&desc);
         std::printf("image[%u]: %ux%u mips=%u layers=%u format=%u samples=%u bind=0x%x usage=%u misc=0x%x\n",
                     i,
                     desc.Width,
@@ -304,30 +408,84 @@ int main(int argc, char ** argv)
     }
     if (std::strcmp(stage, "enumerate") == 0)
     {
+        if (!destroy_depth_swapchain(xr, depth))
+            return 1;
         std::printf("PASS: create and enumerate only\n");
         return 0;
     }
 
-    std::vector<ID3D11DepthStencilView *> dsv(imageCount);
-    std::vector<ID3D11ShaderResourceView *> srv(imageCount);
-    for (uint32_t i = 0; i < imageCount; i++)
-    {
-        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-        dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        HR_CHECK(device->CreateDepthStencilView(images[i].texture, &dsvDesc, &dsv[i]));
-
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MostDetailedMip = 0;
-        srvDesc.Texture2D.MipLevels = 1;
-        HR_CHECK(device->CreateShaderResourceView(images[i].texture, &srvDesc, &srv[i]));
-    }
     std::printf("created typed DSV and depth-plane SRV for all images\n");
     if (std::strcmp(stage, "views") == 0)
     {
+        if (!destroy_depth_swapchain(xr, depth))
+            return 1;
         std::printf("PASS: create, enumerate, and OVR-style views\n");
+        return 0;
+    }
+
+    if (std::strcmp(stage, "teardown") == 0)
+    {
+        if (!clear_depth_swapchain(xr, context, nullptr, depth, false))
+            return 1;
+        std::printf("released a cleared image; destroying immediately without a probe-side fence\n");
+        if (!destroy_depth_swapchain(xr, depth) || !wait_for_gpu(device, context))
+            return 1;
+        std::printf("PASS: swapchain teardown drained outstanding D3D11 work; post-destroy fence completed\n");
+        return 0;
+    }
+
+    if (std::strcmp(stage, "recreate") == 0 || std::strcmp(stage, "discard") == 0)
+    {
+        constexpr uint32_t swapchainCount = 6;
+        std::vector<SDepthSwapchain> swapchains(swapchainCount);
+        swapchains[0] = std::move(depth);
+        for (uint32_t i = 1; i < swapchainCount; i++)
+        {
+            if (!create_depth_swapchain(xr, session, device, swapchainInfo, true, swapchains[i]))
+                return 1;
+        }
+
+        ID3D11DeviceContext1 * context1 = nullptr;
+        const bool discard = std::strcmp(stage, "discard") == 0;
+        if (discard)
+            HR_CHECK(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                                             reinterpret_cast<void **>(&context1)));
+        for (auto & item: swapchains)
+        {
+            if (!clear_depth_swapchain(xr, context, context1, item, discard))
+                return 1;
+        }
+        std::printf("released work on six depth swapchains; destroying immediately without a probe-side fence\n");
+        for (auto & item: swapchains)
+        {
+            if (!destroy_depth_swapchain(xr, item))
+                return 1;
+        }
+        std::printf("destroyed the first generation of six OVR-style depth swapchains\n");
+
+        for (auto & item: swapchains)
+        {
+            if (!create_depth_swapchain(xr, session, device, swapchainInfo, true, item))
+                return 1;
+        }
+        for (auto & item: swapchains)
+        {
+            if (!clear_depth_swapchain(xr, context, context1, item, discard))
+                return 1;
+        }
+        release(context1);
+        if (!wait_for_gpu(device, context))
+            return 1;
+
+        for (auto & item: swapchains)
+        {
+            if (!destroy_depth_swapchain(xr, item))
+                return 1;
+        }
+        if (!wait_for_gpu(device, context))
+            return 1;
+        std::printf("PASS: six depth swapchains destroyed, recreated, %s, fenced, and destroyed again\n",
+                    discard ? "discarded/cleared" : "cleared");
         return 0;
     }
 
@@ -393,13 +551,13 @@ int main(int argc, char ** argv)
     {
         uint32_t imageIndex = 0;
         XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        XR_CHECK(xr.acquireImage(swapchain, &acquireInfo, &imageIndex));
+        XR_CHECK(xr.acquireImage(depth.handle, &acquireInfo, &imageIndex));
         XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
         waitInfo.timeout = XR_INFINITE_DURATION;
-        XR_CHECK(xr.waitImage(swapchain, &waitInfo));
+        XR_CHECK(xr.waitImage(depth.handle, &waitInfo));
 
         const float expectedDepth = 0.25f * static_cast<float>(cycle + 1);
-        context->ClearDepthStencilView(dsv[imageIndex],
+        context->ClearDepthStencilView(depth.dsv[imageIndex],
                                        D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL,
                                        expectedDepth,
                                        static_cast<UINT8>(0x5a + cycle));
@@ -407,7 +565,7 @@ int main(int argc, char ** argv)
         if (sampleShader)
         {
             context->CSSetShader(sampleShader, nullptr, 0);
-            context->CSSetShaderResources(0, 1, &srv[imageIndex]);
+            context->CSSetShaderResources(0, 1, &depth.srv[imageIndex]);
             context->CSSetUnorderedAccessViews(0, 1, &sampleResultView, nullptr);
             context->Dispatch(1, 1, 1);
 
@@ -439,7 +597,7 @@ int main(int argc, char ** argv)
         }
 
         XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        XR_CHECK(xr.releaseImage(swapchain, &releaseInfo));
+        XR_CHECK(xr.releaseImage(depth.handle, &releaseInfo));
         std::printf("cycle %u completed on image %u\n", cycle, imageIndex);
     }
     std::printf("PASS: two clear%s cycles and GPU event fences completed\n",
@@ -450,11 +608,8 @@ int main(int argc, char ** argv)
     release(sampleResult);
     release(sampleShader);
 
-    for (auto * view: srv)
-        release(view);
-    for (auto * view: dsv)
-        release(view);
-    xr.destroySwapchain(swapchain);
+    if (!destroy_depth_swapchain(xr, depth))
+        return 1;
     xr.destroySession(session);
     release(context);
     release(device);

@@ -83,6 +83,7 @@ typedef struct {
   XrSession host_session;
   wine_XrInstance *instance;
   uint32_t session_type;
+  CRITICAL_SECTION swapchain_destroy_lock;
   struct list entry;
   uint32_t composition_layer_count;
   CompositionLayer *composition_layers;
