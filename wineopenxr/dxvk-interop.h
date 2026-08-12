@@ -143,7 +143,7 @@ static FORCEINLINE HRESULT IDXGIVkInteropSurface_GetVulkanImageInfo(IDXGIVkInter
 #define __IDXGIVkInteropDevice_INTERFACE_DEFINED__
 
 DEFINE_GUID(IID_IDXGIVkInteropDevice, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x23);
-DEFINE_GUID(IID_IDXGIVkInteropDevice2, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x24);
+DEFINE_GUID(IID_IDXGIVkInteropDevice2, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x25);
 #if defined(__cplusplus) && !defined(CINTERFACE)
 MIDL_INTERFACE("e2ef5fa5-dc21-4af7-90c4-f67ef6a09323")
 IDXGIVkInteropDevice : public IUnknown
@@ -173,7 +173,7 @@ IDXGIVkInteropDevice : public IUnknown
         ) = 0;
 
 };
-MIDL_INTERFACE("e2ef5fa5-dc21-4af7-90c4-f67ef6a09324")
+MIDL_INTERFACE("e2ef5fa5-dc21-4af7-90c4-f67ef6a09325")
 IDXGIVkInteropDevice2 : public IDXGIVkInteropDevice
 {
     virtual void STDMETHODCALLTYPE GetSubmissionQueue2(
@@ -185,10 +185,13 @@ IDXGIVkInteropDevice2 : public IDXGIVkInteropDevice
         const D3D11_TEXTURE2D_DESC1 *pDesc,
         VkImage vkImage,
         ID3D11Texture2D **ppTexture2D) = 0;
+
+    virtual void STDMETHODCALLTYPE WaitForGpuIdle(
+        ) = 0;
 };
 #ifdef __CRT_UUID_DECL
 __CRT_UUID_DECL(IDXGIVkInteropDevice, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x23)
-__CRT_UUID_DECL(IDXGIVkInteropDevice2, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x24)
+__CRT_UUID_DECL(IDXGIVkInteropDevice2, 0xe2ef5fa5, 0xdc21, 0x4af7, 0x90,0xc4, 0xf6,0x7e,0xf6,0xa0,0x93,0x25)
 #endif
 #else
 typedef struct IDXGIVkInteropDeviceVtbl {
@@ -295,6 +298,9 @@ typedef struct IDXGIVkInteropDevice2Vtbl {
         const D3D11_TEXTURE2D_DESC1 *pDesc,
         VkImage vkImage,
         ID3D11Texture2D **ppTexture2D);
+
+    void (STDMETHODCALLTYPE *WaitForGpuIdle)(
+        IDXGIVkInteropDevice2 *This);
 
     END_INTERFACE
 } IDXGIVkInteropDevice2Vtbl;

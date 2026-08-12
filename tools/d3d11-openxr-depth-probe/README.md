@@ -14,6 +14,17 @@ Stages are intentionally ordered from lowest risk to highest:
    release cycles.
 4. `sample`: additionally sample the cleared depth plane through the typed SRV,
    copy the value to a staging buffer, and verify readback in both cycles.
+5. `teardown`: acquire/wait/clear/release, immediately release the OVR-style
+   DSV/SRV and destroy the swapchain without an application-side fence, then
+   issue an unrelated D3D11 event fence. This isolates the destroy path's own
+   GPU drain and wrapper/view teardown ordering.
+6. `recreate`: create six OVR-style depth swapchains, queue and release a clear
+   on every one, immediately destroy all six without an application-side fence,
+   recreate all six, clear/release/fence them, destroy them again, and fence
+   once more. This reproduces Unity's startup eye-texture rebuild.
+7. `discard`: run `recreate`, but call `ID3D11DeviceContext1::DiscardView` on
+   every acquired DSV before clearing it. This covers Oculus XR Plugin's
+   `Optimize Buffer Discards: Yes` path separately.
 
 The guarded runner compares kernel Xid counts before and after every stage and
 returns 99 after any new NVIDIA Xid. It never kills Wine or a wineserver.
@@ -24,12 +35,18 @@ bash tools/d3d11-openxr-depth-probe/run-guarded.sh enumerate
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh views
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh clear
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh sample
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh teardown
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh recreate
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh discard
 ```
 
 Run the stages in that order and stop after any failure or exit 99. `enumerate`
 must report resource format 19 (`DXGI_FORMAT_R32G8X24_TYPELESS`). `sample` is
 the first stage that exercises DSV write, SRV transition, readback, command-list
 restore, release, and reacquire together.
+
+`teardown`, `recreate`, and `discard` deliberately allocate and destroy real
+runtime images. Do not run them concurrently with another OpenXR application.
 
 The WiVRn runtime must already be running. The runner does not start, restart,
 or deploy any component.

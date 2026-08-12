@@ -79,6 +79,7 @@ typedef struct {
   XrSession client_session;
   wine_XrInstance *instance;
   uint32_t session_type;
+  CRITICAL_SECTION swapchain_destroy_lock;
 } wine_XrSession;
 
 static inline wine_XrSession *wine_session_from_handle(XrSession handle) {
