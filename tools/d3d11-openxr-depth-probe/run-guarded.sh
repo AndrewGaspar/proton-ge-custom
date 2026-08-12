@@ -7,8 +7,8 @@ proton_dir=/home/ajg/.config/heroic/tools/proton/GE-Proton10-32
 prefix_dir=/home/ajg/Games/Heroic/Prefixes/MetaHorizon/pfx
 
 case "$stage" in
-  enumerate|views|clear|sample) ;;
-  *) echo "usage: $0 [enumerate|views|clear|sample] [probe-dir]" >&2; exit 2 ;;
+  enumerate|views|clear|sample|teardown|recreate|discard) ;;
+  *) echo "usage: $0 [enumerate|views|clear|sample|teardown|recreate|discard] [probe-dir]" >&2; exit 2 ;;
 esac
 
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
