@@ -89,6 +89,40 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("our_d3d11[i].next = NULL;", wineopenxr)
         self.assertIn("our_d3d11[j].texture->lpVtbl->Release", wineopenxr)
 
+        destroy = wineopenxr.split("XrResult WINAPI xrDestroySwapchain", 1)[1].split(
+            "static D3D11_USAGE", 1
+        )[0]
+        self.assertLess(destroy.index("WaitForGpuIdle"), destroy.index("release_d3d11_resources"))
+        self.assertLess(destroy.index("release_d3d11_resources"), destroy.index("UNIX_CALL(xrDestroySwapchain"))
+        enter = destroy.index("EnterCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)")
+        wait = destroy.index("WaitForGpuIdle")
+        leave = destroy.index("LeaveCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)")
+        release = destroy.index("release_d3d11_resources")
+        self.assertLess(enter, wait)
+        self.assertLess(wait, leave)
+        self.assertLess(leave, release)
+        self.assertEqual(destroy.count("EnterCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)"), 1)
+        self.assertEqual(destroy.count("LeaveCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)"), 1)
+        self.assertIn("swapchain->images = NULL;", wineopenxr)
+        self.assertIn("swapchain->image_count = 0;", wineopenxr)
+
+        wine_interop = (PROTON_ROOT / "wineopenxr/dxvk-interop.h").read_text()
+        dxvk_interop = (PROTON_ROOT / "dxvk/src/d3d11/d3d11_interop.cpp").read_text()
+        dxvk_interfaces = (PROTON_ROOT / "dxvk/src/dxgi/dxgi_interfaces.h").read_text()
+        dxvk_device = (PROTON_ROOT / "dxvk/src/d3d11/d3d11_device.cpp").read_text()
+        self.assertIn("0xa0,0x93,0x25", wine_interop)
+        self.assertIn("IDXGIVkInteropDevice2 : public IDXGIVkInteropDevice1", dxvk_interfaces)
+        self.assertIn("0xa0,0x93,0x25", dxvk_interfaces)
+        self.assertIn("immediateContext->SynchronizeCsThread", dxvk_interop)
+        self.assertIn("m_device->GetDXVKDevice()->waitForIdle", dxvk_interop)
+        wait_for_idle = dxvk_interop.split("D3D11VkInterop::WaitForGpuIdle", 1)[1]
+        self.assertLess(wait_for_idle.index("immediateContext->Flush"),
+                        wait_for_idle.index("immediateContext->SynchronizeCsThread"))
+        self.assertLess(wait_for_idle.index("immediateContext->SynchronizeCsThread"),
+                        wait_for_idle.index("m_device->GetDXVKDevice()->waitForIdle"))
+        self.assertIn("riid == __uuidof(IDXGIVkInteropDevice1)", dxvk_device)
+        self.assertIn("riid == __uuidof(IDXGIVkInteropDevice2)", dxvk_device)
+
         self.assertIn("vkImage != VK_NULL_HANDLE", dxvk)
         self.assertIn("VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL", dxvk)
         self.assertIn("trackedLayout = imageInfo.layout;", dxvk)
@@ -96,6 +130,10 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;", probe)
         self.assertIn("srvDesc.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;", probe)
         self.assertIn("for (uint32_t cycle = 0; cycle < 2; cycle++)", probe)
+        self.assertIn("constexpr uint32_t swapchainCount = 6;", probe)
+        self.assertIn("context1->DiscardView", probe)
+        self.assertIn('std::strcmp(stage, "teardown")', probe)
+        self.assertIn('std::strcmp(stage, "recreate")', probe)
 
         for usage in (
             "XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL",
