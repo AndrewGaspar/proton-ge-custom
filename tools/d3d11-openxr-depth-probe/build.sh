@@ -2,6 +2,13 @@
 set -euo pipefail
 
 out_dir=${1:-/tmp/d3d11-openxr-depth-probe}
+loader_dll=${OPENXR_LOADER_DLL:-}
+
+if [[ -z "$loader_dll" || ! -f "$loader_dll" ]]; then
+  echo "FAIL: set OPENXR_LOADER_DLL to a Windows OpenXR 1.1 loader DLL" >&2
+  exit 2
+fi
+
 mkdir -p "$out_dir"
 
 x86_64-w64-mingw32-g++ \
@@ -12,5 +19,4 @@ x86_64-w64-mingw32-g++ \
   -o "$out_dir/d3d11-openxr-depth-probe.exe" \
   -ld3d11 -ld3dcompiler -ldxgi -ldxguid
 
-cp /home/ajg/Games/Heroic/Prefixes/MetaHorizon/pfx/drive_c/MetaGames/Software/stress-level-zero-inc-bonelab/BONELAB_Oculus_Windows64_Data/Plugins/x86_64/openxr_loader.dll \
-  "$out_dir/openxr_loader.dll"
+cp "$loader_dll" "$out_dir/openxr_loader.dll"
