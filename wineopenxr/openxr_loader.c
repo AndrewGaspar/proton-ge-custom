@@ -899,6 +899,24 @@ int64_t map_format_vulkan_to_dxgi(int64_t format) {
   }
 }
 
+/*
+ * OpenXR enumerates and accepts the concrete D32S8 format, but the D3D
+ * swapchain resource must use its associated typeless format so applications
+ * can create concrete DSV and SRV views. Keep this scoped to D32S8: the private
+ * DXVK import API does not receive the actual Vulkan format, so broadly
+ * converting colour resources could make its inferred base format differ from
+ * the pre-existing image.
+ */
+static DXGI_FORMAT dxgi_swapchain_resource_format(DXGI_FORMAT format) {
+  switch (format) {
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+      return DXGI_FORMAT_R32G8X24_TYPELESS;
+
+    default:
+      return format;
+  }
+}
+
 XrResult WINAPI xrEnumerateSwapchainFormats(XrSession session,
                                             uint32_t formatCapacityInput,
                                             uint32_t *formatCountOutput,
@@ -1208,7 +1226,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
       desc.Height = wine_swapchain->create_info.height;
       desc.MipLevels = wine_swapchain->create_info.mipCount;
       desc.ArraySize = wine_swapchain->create_info.arraySize;
-      desc.Format = wine_swapchain->create_info.format;
+      desc.Format = dxgi_swapchain_resource_format(wine_swapchain->create_info.format);
       TRACE("creating dxvk texture with dxgi format %d (%x)\n", desc.Format, desc.Format);
       desc.SampleDesc.Count = wine_swapchain->create_info.sampleCount;
       desc.SampleDesc.Quality = 0;
@@ -1220,12 +1238,14 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
 
       our_d3d11 = malloc(sizeof(XrSwapchainImageD3D11KHR) * image_count);
       for (i = 0; i < image_count; ++i) {
+        our_d3d11[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+        our_d3d11[i].next = NULL;
         hr = wine_instance->dxvk_device->lpVtbl->CreateTexture2DFromVkImage(wine_instance->dxvk_device, &desc,
                                                                             our_vk[i].image, &our_d3d11[i].texture);
         if (FAILED(hr)) {
           UINT j;
           for (j = 0; j < i; ++j) {
-            our_d3d11[i].texture->lpVtbl->Release(our_d3d11[i].texture);
+            our_d3d11[j].texture->lpVtbl->Release(our_d3d11[j].texture);
           }
           free(our_d3d11);
           free(our_vk);
