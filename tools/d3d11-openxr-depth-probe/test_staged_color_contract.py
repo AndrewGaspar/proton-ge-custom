@@ -36,6 +36,27 @@ class StagedColorState:
 
 
 class StagedColorContractTest(unittest.TestCase):
+    def test_private_abi_mismatch_directions_fail_closed(self):
+        request = 0x5758525245513031
+        magic = 0x575852554E495831
+
+        def new_unix(legacy_request, appended_magic=None):
+            if legacy_request != request:
+                return "legacy-pe-rejected-before-extended-access"
+            if appended_magic != magic:
+                return "new-pe-version-rejected"
+            return "ack"
+
+        def new_pe(unix_ack_magic, unix_call_count, expected_call_count=398):
+            return unix_ack_magic == magic and unix_call_count == expected_call_count
+
+        self.assertEqual(new_unix(0), "legacy-pe-rejected-before-extended-access")
+        self.assertEqual(new_unix(request, magic), "ack")
+        # An old Unix half never writes the appended acknowledgement, so the
+        # new PE's zero-initialized ack check rejects that direction as well.
+        self.assertFalse(new_pe(0, 0))
+        self.assertTrue(new_pe(magic, 398))
+
     def test_pair_verifier_checks_generated_table_and_both_handshake_halves(self):
         verifier = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/verify_wineopenxr_pair.py").read_text()
         self.assertIn("__wine_unix_call_funcs", verifier)
