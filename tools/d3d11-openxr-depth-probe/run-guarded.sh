@@ -19,14 +19,14 @@ if [[ -z "$umu_run" ]]; then
 fi
 
 case "$stage" in
-  bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity) ;;
-  *) echo "usage: $0 [bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity] [probe-dir]" >&2; exit 2 ;;
+  bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity) ;;
+  *) echo "usage: $0 [bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity] [probe-dir]" >&2; exit 2 ;;
 esac
 
 case "$stage" in
   bootstrap) stage_timeout=30s ;;
   enumerate|views|clear|sample) stage_timeout=45s ;;
-  teardown|recreate|discard|draw) stage_timeout=60s ;;
+  teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw) stage_timeout=60s ;;
   frame|unity) stage_timeout=90s ;;
 esac
 
@@ -71,6 +71,11 @@ case "$stage" in
   teardown) expected='PASS: swapchain teardown drained outstanding D3D11 work; post-destroy fence completed' ;;
   recreate) expected='PASS: six depth swapchains destroyed, recreated, cleared, fenced, and destroyed again' ;;
   discard) expected='PASS: six depth swapchains destroyed, recreated, discarded/cleared, fenced, and destroyed again' ;;
+  draw-color) expected='PASS: imported cross-GPU color-only draw completed with an event fence' ;;
+  draw-depth) expected='PASS: client-local D32S8 depth-only draw completed with an event fence' ;;
+  draw-native-pair) expected='PASS: native NVIDIA color plus client-local D32S8 draw completed with an event fence' ;;
+  draw-bind) expected='PASS: mixed imported color and local D32S8 bind without Draw completed with an event fence' ;;
+  draw-dsv-disabled) expected='PASS: mixed pair color draw with DSV bound and depth disabled completed with an event fence' ;;
   draw) expected='PASS: paired color RTV and D32S8 DSV draw completed with an event fence' ;;
   frame) expected='PASS: stereo color/depth draw and projection+depth xrEndFrame completed' ;;
   unity) expected='PASS: Unity-style color/depth rebuild and projection+depth frame completed' ;;

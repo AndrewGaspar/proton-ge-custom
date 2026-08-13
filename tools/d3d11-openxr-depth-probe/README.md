@@ -27,19 +27,35 @@ Stages are intentionally ordered from lowest risk to highest:
 8. `discard`: run `recreate`, but call `ID3D11DeviceContext1::DiscardView` on
    every acquired DSV before clearing it. This covers Oculus XR Plugin's
    `Optimize Buffer Discards: Yes` path separately.
-9. `draw`: create a real cross-GPU RGBA8 color swapchain alongside D32S8,
+9. `draw-color`: draw to a real cross-GPU RGBA8 color swapchain without a
+   depth attachment. This isolates the imported color attachment and its
+   FOREIGN ownership/layout path.
+10. `draw-depth`: execute a depth-writing draw against the client-local D32S8
+   swapchain with no color attachment. This differs from `clear` by exercising
+   an actual graphics pipeline and depth tests.
+11. `draw-native-pair`: bind an ordinary DXVK-created NVIDIA color texture
+   alongside the borrowed client-local D32S8 swapchain image. This separates
+   mixed attachment provenance from the format and render-pipeline contract.
+12. `draw-bind`: acquire and bind the imported cross-GPU color RTV and local
+   D32S8 DSV together, then unbind without a clear or Draw. This determines
+   whether mere D3D11 binding/lifecycle is safe; DXVK may defer actual dynamic
+   rendering setup until work is emitted.
+13. `draw-dsv-disabled`: draw color to the imported RTV while the local D32S8
+   DSV remains bound, but leave depth testing and writes disabled and never
+   clear depth. This isolates attachment presence from depth access.
+14. `draw`: create a real cross-GPU RGBA8 color swapchain alongside D32S8,
    validate both imported D3D11 resource descriptors, bind a typed RTV and DSV,
    clear them, execute a depth-writing VS/PS draw, complete an event-query
    fence, and release both images. This is the first stage that puts the
    cross-GPU color image and client-local depth image in one graphics render
    pass.
-10. `frame`: begin an active stereo OpenXR session, create separate color/depth
+15. `frame`: begin an active stereo OpenXR session, create separate color/depth
    pairs for both eyes, discard/clear/draw each pair without an application
    fence before release, and submit them through `xrEndFrame` as a projection
    layer with `XrCompositionLayerDepthInfoKHR` chains for up to three seconds
    (at most 120 attempts). It then verifies that a post-submit D3D11 event fence
    completes.
-11. `unity`: require three images in each per-eye color and depth swapchain,
+16. `unity`: require three images in each per-eye color and depth swapchain,
     destroy the resulting six texture pairs before rendering, recreate all six
     pairs, then run the same discard/draw/projection-depth frame loop. This
     matches the two `XRTextureManager` generations in Walkabout's `Player.log`.
@@ -59,6 +75,11 @@ bash tools/d3d11-openxr-depth-probe/run-guarded.sh sample
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh teardown
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh recreate
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh discard
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-color
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-depth
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-native-pair
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-bind
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-dsv-disabled
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh frame
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh unity
