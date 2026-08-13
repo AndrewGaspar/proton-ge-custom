@@ -40,6 +40,8 @@ def main():
         raise SystemExit("FAIL: PE does not contain the private-ABI handshake diagnostic")
     if "PE/Unix ABI magic mismatch" not in unix_strings:
         raise SystemExit("FAIL: Unix library does not contain the private-ABI handshake diagnostic")
+    if "PE/Unix ABI request marker missing" not in unix_strings:
+        raise SystemExit("FAIL: Unix library cannot safely reject a legacy PE")
 
     print(f"PASS: matched WineOpenXR pair carries a {len(entries)}-call ({actual_bytes}-byte) private ABI")
 
