@@ -540,6 +540,190 @@ static bool draw_color_depth_pair(
   return true;
 }
 
+static bool draw_imported_color_only(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    const SDrawPipeline &pipeline, SColorSwapchain &color, uint32_t width,
+    uint32_t height) {
+  uint32_t colorIndex = 0;
+  bool acquired = false;
+  if (!acquire_swapchain_image(xr, color.handle, colorIndex, acquired)) {
+    if (acquired)
+      release_swapchain_image(xr, color.handle);
+    return false;
+  }
+
+  const float clearColor[]{0.0f, 0.0f, 0.0f, 1.0f};
+  context->ClearRenderTargetView(color.rtv[colorIndex], clearColor);
+  D3D11_VIEWPORT viewport{};
+  viewport.Width = static_cast<float>(width);
+  viewport.Height = static_cast<float>(height);
+  viewport.MaxDepth = 1.0f;
+  context->RSSetViewports(1, &viewport);
+  context->OMSetRenderTargets(1, &color.rtv[colorIndex], nullptr);
+  context->OMSetDepthStencilState(nullptr, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(pipeline.vertexShader, nullptr, 0);
+  context->PSSetShader(pipeline.pixelShader, nullptr, 0);
+  context->Draw(3, 0);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+
+  const bool fenceOk = wait_for_gpu(device, context);
+  const bool releaseOk = release_swapchain_image(xr, color.handle);
+  return fenceOk && releaseOk;
+}
+
+static bool draw_local_depth_only(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    const SDrawPipeline &pipeline, SDepthSwapchain &depth, uint32_t width,
+    uint32_t height) {
+  uint32_t depthIndex = 0;
+  bool acquired = false;
+  if (!acquire_swapchain_image(xr, depth.handle, depthIndex, acquired)) {
+    if (acquired)
+      release_swapchain_image(xr, depth.handle);
+    return false;
+  }
+
+  context->ClearDepthStencilView(
+      depth.dsv[depthIndex], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+  D3D11_VIEWPORT viewport{};
+  viewport.Width = static_cast<float>(width);
+  viewport.Height = static_cast<float>(height);
+  viewport.MaxDepth = 1.0f;
+  context->RSSetViewports(1, &viewport);
+  context->OMSetRenderTargets(0, nullptr, depth.dsv[depthIndex]);
+  context->OMSetDepthStencilState(pipeline.depthState, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(pipeline.vertexShader, nullptr, 0);
+  context->PSSetShader(nullptr, nullptr, 0);
+  context->Draw(3, 0);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+
+  const bool fenceOk = wait_for_gpu(device, context);
+  const bool releaseOk = release_swapchain_image(xr, depth.handle);
+  return fenceOk && releaseOk;
+}
+
+static bool draw_native_color_local_depth_pair(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    const SDrawPipeline &pipeline, DXGI_FORMAT colorFormat,
+    SDepthSwapchain &depth, uint32_t width, uint32_t height) {
+  D3D11_TEXTURE2D_DESC colorDesc{};
+  colorDesc.Width = width;
+  colorDesc.Height = height;
+  colorDesc.MipLevels = 1;
+  colorDesc.ArraySize = 1;
+  colorDesc.Format = colorFormat;
+  colorDesc.SampleDesc.Count = 1;
+  colorDesc.Usage = D3D11_USAGE_DEFAULT;
+  colorDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+  ID3D11Texture2D *colorTexture = nullptr;
+  ID3D11RenderTargetView *colorRtv = nullptr;
+  if (!hr_ok(device->CreateTexture2D(&colorDesc, nullptr, &colorTexture),
+             "ID3D11Device::CreateTexture2D(native color)") ||
+      !hr_ok(device->CreateRenderTargetView(colorTexture, nullptr, &colorRtv),
+             "ID3D11Device::CreateRenderTargetView(native color)")) {
+    release(colorRtv);
+    release(colorTexture);
+    return false;
+  }
+
+  uint32_t depthIndex = 0;
+  bool acquired = false;
+  if (!acquire_swapchain_image(xr, depth.handle, depthIndex, acquired)) {
+    if (acquired)
+      release_swapchain_image(xr, depth.handle);
+    release(colorRtv);
+    release(colorTexture);
+    return false;
+  }
+
+  const float clearColor[]{0.0f, 0.0f, 0.0f, 1.0f};
+  context->ClearRenderTargetView(colorRtv, clearColor);
+  context->ClearDepthStencilView(
+      depth.dsv[depthIndex], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+  D3D11_VIEWPORT viewport{};
+  viewport.Width = static_cast<float>(width);
+  viewport.Height = static_cast<float>(height);
+  viewport.MaxDepth = 1.0f;
+  context->RSSetViewports(1, &viewport);
+  context->OMSetRenderTargets(1, &colorRtv, depth.dsv[depthIndex]);
+  context->OMSetDepthStencilState(pipeline.depthState, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(pipeline.vertexShader, nullptr, 0);
+  context->PSSetShader(pipeline.pixelShader, nullptr, 0);
+  context->Draw(3, 0);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+
+  const bool fenceOk = wait_for_gpu(device, context);
+  const bool releaseOk = release_swapchain_image(xr, depth.handle);
+  release(colorRtv);
+  release(colorTexture);
+  return fenceOk && releaseOk;
+}
+
+static bool bind_mixed_pair_without_draw(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    SColorSwapchain &color, SDepthSwapchain &depth) {
+  uint32_t colorIndex = 0;
+  uint32_t depthIndex = 0;
+  bool colorAcquired = false;
+  bool depthAcquired = false;
+  if (!acquire_swapchain_image(xr, color.handle, colorIndex, colorAcquired) ||
+      !acquire_swapchain_image(xr, depth.handle, depthIndex, depthAcquired)) {
+    if (depthAcquired)
+      release_swapchain_image(xr, depth.handle);
+    if (colorAcquired)
+      release_swapchain_image(xr, color.handle);
+    return false;
+  }
+
+  context->OMSetRenderTargets(1, &color.rtv[colorIndex], depth.dsv[depthIndex]);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+  const bool fenceOk = wait_for_gpu(device, context);
+  const bool depthReleaseOk = release_swapchain_image(xr, depth.handle);
+  const bool colorReleaseOk = release_swapchain_image(xr, color.handle);
+  return fenceOk && depthReleaseOk && colorReleaseOk;
+}
+
+static bool draw_mixed_pair_with_depth_disabled(
+    const SXrFunctions &xr, ID3D11Device *device, ID3D11DeviceContext *context,
+    const SDrawPipeline &pipeline, SColorSwapchain &color,
+    SDepthSwapchain &depth, uint32_t width, uint32_t height) {
+  uint32_t colorIndex = 0;
+  uint32_t depthIndex = 0;
+  bool colorAcquired = false;
+  bool depthAcquired = false;
+  if (!acquire_swapchain_image(xr, color.handle, colorIndex, colorAcquired) ||
+      !acquire_swapchain_image(xr, depth.handle, depthIndex, depthAcquired)) {
+    if (depthAcquired)
+      release_swapchain_image(xr, depth.handle);
+    if (colorAcquired)
+      release_swapchain_image(xr, color.handle);
+    return false;
+  }
+
+  const float clearColor[]{0.0f, 0.0f, 0.0f, 1.0f};
+  context->ClearRenderTargetView(color.rtv[colorIndex], clearColor);
+  D3D11_VIEWPORT viewport{};
+  viewport.Width = static_cast<float>(width);
+  viewport.Height = static_cast<float>(height);
+  viewport.MaxDepth = 1.0f;
+  context->RSSetViewports(1, &viewport);
+  context->OMSetRenderTargets(1, &color.rtv[colorIndex], depth.dsv[depthIndex]);
+  context->OMSetDepthStencilState(nullptr, 0);
+  context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  context->VSSetShader(pipeline.vertexShader, nullptr, 0);
+  context->PSSetShader(pipeline.pixelShader, nullptr, 0);
+  context->Draw(3, 0);
+  context->OMSetRenderTargets(0, nullptr, nullptr);
+
+  const bool fenceOk = wait_for_gpu(device, context);
+  const bool depthReleaseOk = release_swapchain_image(xr, depth.handle);
+  const bool colorReleaseOk = release_swapchain_image(xr, color.handle);
+  return fenceOk && depthReleaseOk && colorReleaseOk;
+}
+
 static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
                                  XrSession session) {
   const auto deadline =
@@ -804,12 +988,18 @@ int main(int argc, char ** argv)
       std::strcmp(stage, "sample") != 0 &&
       std::strcmp(stage, "teardown") != 0 &&
       std::strcmp(stage, "recreate") != 0 &&
-      std::strcmp(stage, "discard") != 0 && std::strcmp(stage, "draw") != 0 &&
+      std::strcmp(stage, "discard") != 0 &&
+      std::strcmp(stage, "draw-color") != 0 &&
+      std::strcmp(stage, "draw-depth") != 0 &&
+      std::strcmp(stage, "draw-native-pair") != 0 &&
+      std::strcmp(stage, "draw-bind") != 0 &&
+      std::strcmp(stage, "draw-dsv-disabled") != 0 &&
+      std::strcmp(stage, "draw") != 0 &&
       std::strcmp(stage, "frame") != 0 && std::strcmp(stage, "unity") != 0) {
     std::fprintf(
         stderr,
         "usage: %s "
-        "[bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw|frame|unity]\n",
+        "[bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity]\n",
                      argv[0]);
         return 2;
     }
@@ -949,7 +1139,16 @@ int main(int argc, char ** argv)
                  "FAIL: DXGI_FORMAT_D32_FLOAT_S8X24_UINT is not advertised\n");
     return 1;
   }
-  if ((std::strcmp(stage, "draw") == 0 || projectionStage) &&
+  const bool drawColorStage = std::strcmp(stage, "draw-color") == 0;
+  const bool drawDepthStage = std::strcmp(stage, "draw-depth") == 0;
+  const bool drawNativePairStage =
+      std::strcmp(stage, "draw-native-pair") == 0;
+  const bool drawBindStage = std::strcmp(stage, "draw-bind") == 0;
+  const bool drawDsvDisabledStage =
+      std::strcmp(stage, "draw-dsv-disabled") == 0;
+  const bool drawMixedStage = std::strcmp(stage, "draw") == 0;
+  if ((drawColorStage || drawNativePairStage || drawBindStage ||
+       drawDsvDisabledStage || drawMixedStage || projectionStage) &&
       colorFormat == DXGI_FORMAT_UNKNOWN) {
     std::fprintf(
         stderr,
@@ -1014,7 +1213,8 @@ int main(int argc, char ** argv)
         return 0;
     }
 
-  if (std::strcmp(stage, "draw") == 0 || projectionStage) {
+  if (drawColorStage || drawDepthStage || drawNativePairStage || drawBindStage ||
+      drawDsvDisabledStage || drawMixedStage || projectionStage) {
     XrSwapchainCreateInfo colorInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     colorInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -1031,7 +1231,9 @@ int main(int argc, char ** argv)
     depths[0] = std::move(depth);
     const uint32_t pairCount = projectionStage ? 2 : 1;
     for (uint32_t eye = 0; eye < pairCount; eye++) {
-      if (!create_color_swapchain(xr, session, device, colorInfo, colors[eye]))
+      if ((drawColorStage || drawBindStage || drawDsvDisabledStage ||
+           drawMixedStage || projectionStage) &&
+          !create_color_swapchain(xr, session, device, colorInfo, colors[eye]))
             return 1;
       if (eye > 0 && !create_depth_swapchain(xr, session, device, swapchainInfo,
                                              true, depths[eye]))
@@ -1079,6 +1281,25 @@ int main(int argc, char ** argv)
       succeeded = run_projection_frame(
           xr, instance, session, device, context, pipeline, colors, depths,
           swapchainInfo.width, swapchainInfo.height);
+    else if (drawColorStage)
+      succeeded = draw_imported_color_only(
+          xr, device, context, pipeline, colors[0], swapchainInfo.width,
+          swapchainInfo.height);
+    else if (drawDepthStage)
+      succeeded = draw_local_depth_only(
+          xr, device, context, pipeline, depths[0], swapchainInfo.width,
+          swapchainInfo.height);
+    else if (drawNativePairStage)
+      succeeded = draw_native_color_local_depth_pair(
+          xr, device, context, pipeline, colorFormat, depths[0],
+          swapchainInfo.width, swapchainInfo.height);
+    else if (drawBindStage)
+      succeeded = bind_mixed_pair_without_draw(
+          xr, device, context, colors[0], depths[0]);
+    else if (drawDsvDisabledStage)
+      succeeded = draw_mixed_pair_with_depth_disabled(
+          xr, device, context, pipeline, colors[0], depths[0],
+          swapchainInfo.width, swapchainInfo.height);
     else
       succeeded = draw_color_depth_pair(
           xr, device, context, nullptr, pipeline, colors[0], depths[0],
@@ -1098,6 +1319,21 @@ int main(int argc, char ** argv)
     else if (frameStage)
       std::printf("PASS: stereo color/depth draw and projection+depth "
                   "xrEndFrame completed\n");
+    else if (drawColorStage)
+      std::printf("PASS: imported cross-GPU color-only draw completed with an "
+                  "event fence\n");
+    else if (drawDepthStage)
+      std::printf("PASS: client-local D32S8 depth-only draw completed with an "
+                  "event fence\n");
+    else if (drawNativePairStage)
+      std::printf("PASS: native NVIDIA color plus client-local D32S8 draw "
+                  "completed with an event fence\n");
+    else if (drawBindStage)
+      std::printf("PASS: mixed imported color and local D32S8 bind without "
+                  "Draw completed with an event fence\n");
+    else if (drawDsvDisabledStage)
+      std::printf("PASS: mixed pair color draw with DSV bound and depth "
+                  "disabled completed with an event fence\n");
     else
       std::printf("PASS: paired color RTV and D32S8 DSV draw completed with an "
                   "event fence\n");
