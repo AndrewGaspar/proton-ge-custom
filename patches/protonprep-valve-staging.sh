@@ -286,6 +286,7 @@ apply_all_in_dir() {
     # https://github.com/GloriousEggroll/proton-ge-custom/issues/214
     echo "WINE: -PENDING- add OpenXR patches"
     apply_patch "../patches/wine-hotfixes/pending/0001-decouple-wineopenxr-from-steamvr-and-integrate-it-in.patch"
+    apply_patch "../patches/wine-hotfixes/pending/0002-wineopenxr-staged-cross-gpu-color.patch"
 
 
 ### END WINE PENDING UPSTREAM SECTION ###

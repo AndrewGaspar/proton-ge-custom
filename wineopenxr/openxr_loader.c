@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "initguid.h"
 #include "openxr_loader.h"
@@ -12,6 +13,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(openxr);
 static uint32_t g_physdev_vid, g_physdev_pid;
 static char *g_instance_extensions, *g_device_extensions;
 static XrVersion api_version = XR_CURRENT_API_VERSION;
+
+#define STAGED_COLOR_ENV "WINEOPENXR_STAGED_CROSS_GPU_COLOR"
 
 #define SESSION_TYPE_VULKAN 1
 #define SESSION_TYPE_OPENGL 2
@@ -33,6 +36,17 @@ union CompositionLayer {
 
 static CRITICAL_SECTION session_list_lock = {NULL, -1, 0, 0, 0, 0};
 static struct list session_list = LIST_INIT(session_list);
+
+static BOOL staged_color_swapchain_supported(const wine_XrSession *session,
+                                             const XrSwapchainCreateInfo *info,
+                                             VkFormat format);
+static void collect_staged_color_timestamp(wine_XrSwapchain *swapchain, uint32_t index);
+
+static BOOL env_flag_enabled(const char *name) {
+  const char *value = getenv(name);
+
+  return value && value[0] && strcmp(value, "0") && strcmp(value, "false") && strcmp(value, "FALSE");
+}
 
 static wine_XrSession *get_wrapped_XrSession(XrSession native) {
   wine_XrSession *cursor;
@@ -585,6 +599,9 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
       }
       case XR_TYPE_GRAPHICS_BINDING_D3D11_KHR: {
         const XrGraphicsBindingD3D11KHR *their_d3d11_binding = (const XrGraphicsBindingD3D11KHR *)createInfo->next;
+        VkPhysicalDeviceProperties physical_device_properties;
+        VkQueueFamilyProperties *queue_family_properties;
+        uint32_t queue_family_count = 0;
         HRESULT hr;
 
         hr = ID3D11Device_QueryInterface(their_d3d11_binding->device, &IID_IDXGIVkInteropDevice2,
@@ -600,16 +617,39 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
         wine_instance->dxvk_device->lpVtbl->GetVulkanHandles(wine_instance->dxvk_device, &our_vk_binding.instance,
                                                              &our_vk_binding.physicalDevice, &our_vk_binding.device);
         wine_instance->dxvk_device->lpVtbl->GetSubmissionQueue2(
-            wine_instance->dxvk_device, NULL, &our_vk_binding.queueIndex, &our_vk_binding.queueFamilyIndex);
+            wine_instance->dxvk_device, &wine_instance->vk_queue, &our_vk_binding.queueIndex,
+            &our_vk_binding.queueFamilyIndex);
 
         if ((res = do_vulkan_init(wine_instance, our_vk_binding.instance)) != XR_SUCCESS) {
           return res;
         }
 
         our_vk_binding.physicalDevice = wine_instance->vk_phys_dev;
+        wine_instance->vk_device = our_vk_binding.device;
         our_create_info = *createInfo;
         our_create_info.next = &our_vk_binding;
         session_type = SESSION_TYPE_D3D11;
+
+        wine_session->d3d11_device = their_d3d11_binding->device;
+        ID3D11Device_AddRef(wine_session->d3d11_device);
+        wine_session->staged_color_enabled = env_flag_enabled(STAGED_COLOR_ENV);
+        wine_session->vk_queue_family_index = our_vk_binding.queueFamilyIndex;
+
+        if (wine_session->staged_color_enabled) {
+          vkGetPhysicalDeviceProperties(wine_instance->vk_phys_dev, &physical_device_properties);
+          wine_session->timestamp_period = physical_device_properties.limits.timestampPeriod;
+          vkGetPhysicalDeviceQueueFamilyProperties(wine_instance->vk_phys_dev, &queue_family_count, NULL);
+          queue_family_properties = calloc(queue_family_count, sizeof(*queue_family_properties));
+          if (queue_family_properties) {
+            vkGetPhysicalDeviceQueueFamilyProperties(wine_instance->vk_phys_dev, &queue_family_count,
+                                                     queue_family_properties);
+            if (our_vk_binding.queueFamilyIndex < queue_family_count)
+              wine_session->timestamp_valid_bits =
+                  queue_family_properties[our_vk_binding.queueFamilyIndex].timestampValidBits;
+            free(queue_family_properties);
+          }
+          WARN("Experimental D3D11 staged cross-GPU color is enabled by %s\n", STAGED_COLOR_ENV);
+        }
 
         break;
       }
@@ -686,6 +726,8 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
 
   if (params.result != XR_SUCCESS) {
     WARN("xrCreateSession failed: %d\n", res);
+    if (wine_session->d3d11_device)
+      ID3D11Device_Release(wine_session->d3d11_device);
     free(wine_session);
     return params.result;
   }
@@ -718,6 +760,8 @@ XrResult WINAPI xrDestroySession(XrSession session) {
     return params.result;
   }
 
+  if (wine_session->d3d11_device)
+    ID3D11Device_Release(wine_session->d3d11_device);
   DeleteCriticalSection(&wine_session->swapchain_destroy_lock);
   free(wine_session);
   return XR_SUCCESS;
@@ -1019,6 +1063,22 @@ XrResult WINAPI xrCreateSwapchain(XrSession session, const XrSwapchainCreateInfo
     if ((createInfo->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) && !format_is_depth) {
       WARN("Swapchain has a depth/stencil usage, but it's format is for color\n");
     }
+
+    if (wine_session->session_type == SESSION_TYPE_D3D11 &&
+        staged_color_swapchain_supported(wine_session, createInfo, our_createInfo.format)) {
+      /*
+       * The application-visible D3D11 texture is a separate, ordinary DXVK
+       * allocation.  Only the host transport image needs transfer-destination
+       * usage; do not leak that implementation detail into the D3D descriptor.
+       */
+      our_createInfo.usageFlags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+      wine_swapchain->staged_color = TRUE;
+    } else if (wine_session->session_type == SESSION_TYPE_D3D11 && wine_session->staged_color_enabled &&
+               !format_is_depth) {
+      WARN("Not staging unsupported color swapchain: samples %u, faces %u, create flags %#llx, usage %#llx\n",
+           createInfo->sampleCount, createInfo->faceCount, (unsigned long long)createInfo->createFlags,
+           (unsigned long long)createInfo->usageFlags);
+    }
   }
 
   _status = UNIX_CALL(xrCreateSwapchain, &params);
@@ -1057,12 +1117,39 @@ static void release_d3d12_resources(wine_XrSwapchain *swapchain, uint32_t image_
 }
 
 static void release_d3d11_resources(wine_XrSwapchain *swapchain) {
+  wine_XrSession *session = swapchain->session;
   XrSwapchainImageD3D11KHR *d3d11_images = (XrSwapchainImageD3D11KHR *)swapchain->images;
   UINT i;
 
   for (i = 0; i < swapchain->image_count; i++) {
+    if (swapchain->staged_color)
+      collect_staged_color_timestamp(swapchain, i);
+    if (swapchain->staged_color_images && swapchain->staged_color_images[i].proxy_surface)
+      IDXGIVkInteropSurface_Release(swapchain->staged_color_images[i].proxy_surface);
     d3d11_images[i].texture->lpVtbl->Release(d3d11_images[i].texture);
   }
+
+  if (swapchain->staged_color_images) {
+    for (i = 0; i < swapchain->image_count; i++) {
+      if (swapchain->staged_color_images[i].copy_command)
+        vkFreeCommandBuffers(session->instance->vk_device, swapchain->staged_color_command_pool, 1,
+                             &swapchain->staged_color_images[i].copy_command);
+    }
+    free(swapchain->staged_color_images);
+    swapchain->staged_color_images = NULL;
+  }
+  if (swapchain->staged_color_query_pool) {
+    vkDestroyQueryPool(session->instance->vk_device, swapchain->staged_color_query_pool, NULL);
+    swapchain->staged_color_query_pool = VK_NULL_HANDLE;
+  }
+  if (swapchain->staged_color_command_pool) {
+    vkDestroyCommandPool(session->instance->vk_device, swapchain->staged_color_command_pool, NULL);
+    swapchain->staged_color_command_pool = VK_NULL_HANDLE;
+  }
+  free(swapchain->acquired);
+  free(swapchain->acquired_indices);
+  swapchain->acquired = NULL;
+  swapchain->acquired_indices = NULL;
 
   free(swapchain->images);
   swapchain->images = NULL;
@@ -1186,6 +1273,313 @@ static VkResult record_transition_command(wine_XrInstance *instance,
   return vkEndCommandBuffer(*out_cmd);
 }
 
+static BOOL staged_color_swapchain_supported(const wine_XrSession *session,
+                                             const XrSwapchainCreateInfo *info,
+                                             VkFormat format) {
+  if (!session->staged_color_enabled)
+    return FALSE;
+  if (is_vulkan_format_depth(format) || !(info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT))
+    return FALSE;
+  if (info->sampleCount != 1 || info->faceCount != 1)
+    return FALSE;
+  if (info->createFlags & XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT)
+    return FALSE;
+  return TRUE;
+}
+
+static uint64_t timestamp_delta(uint64_t start, uint64_t end, uint32_t valid_bits) {
+  if (!valid_bits || valid_bits >= 64)
+    return end - start;
+  return (end - start) & ((1ull << valid_bits) - 1);
+}
+
+static void collect_staged_color_timestamp(wine_XrSwapchain *swapchain, uint32_t index) {
+  wine_XrSession *session = swapchain->session;
+  wine_XrStagedColorImage *image = &swapchain->staged_color_images[index];
+  uint64_t timestamps[2];
+  VkResult result;
+  double elapsed_ns;
+
+  if (!image->copy_timestamp_pending || !swapchain->staged_color_query_pool)
+    return;
+
+  result = vkGetQueryPoolResults(session->instance->vk_device, swapchain->staged_color_query_pool, index * 2, 2,
+                                 sizeof(timestamps), timestamps, sizeof(timestamps[0]), VK_QUERY_RESULT_64_BIT);
+  if (result != VK_SUCCESS) {
+    WARN("Staged-color copy timestamp unavailable for image %u: %d\n", index, result);
+    image->copy_timestamp_pending = FALSE;
+    return;
+  }
+
+  elapsed_ns = timestamp_delta(timestamps[0], timestamps[1], session->timestamp_valid_bits) *
+               session->timestamp_period;
+  swapchain->staged_color_copy_count++;
+  swapchain->staged_color_copy_total_ns += elapsed_ns;
+  if (elapsed_ns > swapchain->staged_color_copy_max_ns)
+    swapchain->staged_color_copy_max_ns = elapsed_ns;
+  image->copy_timestamp_pending = FALSE;
+
+  if (swapchain->staged_color_copy_count == 1 || !(swapchain->staged_color_copy_count % 300))
+    WARN("Staged-color copy: %.3f ms last, %.3f ms average, %.3f ms max over %llu copies\n",
+         elapsed_ns / 1000000.0,
+         swapchain->staged_color_copy_total_ns / swapchain->staged_color_copy_count / 1000000.0,
+         swapchain->staged_color_copy_max_ns / 1000000.0,
+         (unsigned long long)swapchain->staged_color_copy_count);
+}
+
+static VkResult record_staged_color_copy(wine_XrSwapchain *swapchain,
+                                         uint32_t index,
+                                         const VkImageCreateInfo *proxy_info) {
+  wine_XrSession *session = swapchain->session;
+  wine_XrInstance *instance = session->instance;
+  wine_XrStagedColorImage *image = &swapchain->staged_color_images[index];
+  VkCommandBufferAllocateInfo allocate_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = swapchain->staged_color_command_pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  VkCommandBufferBeginInfo begin_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+  };
+  VkImageSubresourceRange range = {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .levelCount = proxy_info->mipLevels,
+      .layerCount = proxy_info->arrayLayers,
+  };
+  VkImageMemoryBarrier before[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+          .oldLayout = image->proxy_layout,
+          .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = image->proxy_image,
+          .subresourceRange = range,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+          .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = image->host_image,
+          .subresourceRange = range,
+      },
+  };
+  VkImageMemoryBarrier after[2] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+          .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          .newLayout = image->proxy_layout,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = image->proxy_image,
+          .subresourceRange = range,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+          .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+          .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+          .image = image->host_image,
+          .subresourceRange = range,
+      },
+  };
+  VkResult result;
+  uint32_t mip;
+
+  result = vkAllocateCommandBuffers(instance->vk_device, &allocate_info, &image->copy_command);
+  if (result != VK_SUCCESS)
+    return result;
+  result = vkBeginCommandBuffer(image->copy_command, &begin_info);
+  if (result != VK_SUCCESS)
+    return result;
+
+  if (swapchain->staged_color_query_pool) {
+    vkCmdResetQueryPool(image->copy_command, swapchain->staged_color_query_pool, index * 2, 2);
+    vkCmdWriteTimestamp(image->copy_command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        swapchain->staged_color_query_pool, index * 2);
+  }
+  vkCmdPipelineBarrier(image->copy_command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                       0, NULL, 0, NULL, 2, before);
+  for (mip = 0; mip < proxy_info->mipLevels; mip++) {
+    VkImageCopy copy = {
+        .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, proxy_info->arrayLayers},
+        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, proxy_info->arrayLayers},
+        .extent = {
+            max(1u, proxy_info->extent.width >> mip),
+            max(1u, proxy_info->extent.height >> mip),
+            1,
+        },
+    };
+    vkCmdCopyImage(image->copy_command, image->proxy_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image->host_image,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+  }
+  vkCmdPipelineBarrier(image->copy_command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                       0, NULL, 0, NULL, 2, after);
+  if (swapchain->staged_color_query_pool)
+    vkCmdWriteTimestamp(image->copy_command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        swapchain->staged_color_query_pool, index * 2 + 1);
+  return vkEndCommandBuffer(image->copy_command);
+}
+
+static XrResult create_staged_d3d11_images(wine_XrSwapchain *swapchain,
+                                           const XrSwapchainImageVulkanKHR *host_images,
+                                           uint32_t image_count,
+                                           XrSwapchainImageD3D11KHR **out_images) {
+  wine_XrSession *session = swapchain->session;
+  wine_XrInstance *instance = session->instance;
+  D3D11_TEXTURE2D_DESC desc = {
+      .Width = swapchain->create_info.width,
+      .Height = swapchain->create_info.height,
+      .MipLevels = swapchain->create_info.mipCount,
+      .ArraySize = swapchain->create_info.arraySize,
+      .Format = dxgi_swapchain_resource_format(swapchain->create_info.format),
+      .SampleDesc = {swapchain->create_info.sampleCount, 0},
+      .Usage = D3D11_USAGE_DEFAULT,
+      .BindFlags = d3d11usage_from_XrSwapchainUsageFlags(swapchain->create_info.usageFlags),
+  };
+  const VkFormat expected_format = map_format_dxgi_to_vulkan(swapchain->create_info.format);
+  XrSwapchainImageD3D11KHR *images = calloc(image_count, sizeof(*images));
+  VkQueryPoolCreateInfo query_info = {
+      .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+      .queryType = VK_QUERY_TYPE_TIMESTAMP,
+      .queryCount = image_count * 2,
+  };
+  VkCommandPoolCreateInfo command_pool_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      .queueFamilyIndex = session->vk_queue_family_index,
+  };
+  uint32_t initialized = 0;
+  uint32_t i;
+
+  swapchain->staged_color_images = calloc(image_count, sizeof(*swapchain->staged_color_images));
+  swapchain->acquired = calloc(image_count, sizeof(*swapchain->acquired));
+  swapchain->acquired_indices = calloc(image_count, sizeof(*swapchain->acquired_indices));
+  if (!images || !swapchain->staged_color_images || !swapchain->acquired || !swapchain->acquired_indices)
+    goto fail;
+
+  if (vkCreateCommandPool(instance->vk_device, &command_pool_info, NULL,
+                          &swapchain->staged_color_command_pool) != VK_SUCCESS) {
+    WARN("Cannot create staged-color Vulkan command pool\n");
+    goto fail;
+  }
+
+  if (session->timestamp_valid_bits &&
+      vkCreateQueryPool(instance->vk_device, &query_info, NULL, &swapchain->staged_color_query_pool) != VK_SUCCESS)
+    WARN("Cannot create staged-color timestamp query pool; copy timing is disabled\n");
+
+  for (i = 0; i < image_count; i++) {
+    wine_XrStagedColorImage *staged = &swapchain->staged_color_images[i];
+    VkImageCreateInfo proxy_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+    };
+    HRESULT hr;
+
+    images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR;
+    images[i].next = NULL;
+    hr = ID3D11Device_CreateTexture2D(session->d3d11_device, &desc, NULL, &images[i].texture);
+    if (FAILED(hr)) {
+      WARN("Failed to create staged-color DXVK proxy texture %u: %08x\n", i, hr);
+      goto fail;
+    }
+    initialized = i + 1;
+
+    hr = ID3D11Texture2D_QueryInterface(images[i].texture, &IID_IDXGIVkInteropSurface,
+                                        (void **)&staged->proxy_surface);
+    if (FAILED(hr)) {
+      WARN("Staged-color proxy texture %u has no Vulkan interop surface: %08x\n", i, hr);
+      goto fail;
+    }
+    hr = IDXGIVkInteropSurface_GetVulkanImageInfo(staged->proxy_surface, &staged->proxy_image,
+                                                  &staged->proxy_layout, &proxy_info);
+    if (FAILED(hr)) {
+      WARN("Cannot inspect staged-color proxy texture %u: %08x\n", i, hr);
+      goto fail;
+    }
+    if (proxy_info.imageType != VK_IMAGE_TYPE_2D || proxy_info.format != expected_format ||
+        proxy_info.extent.width != swapchain->create_info.width ||
+        proxy_info.extent.height != swapchain->create_info.height || proxy_info.extent.depth != 1 ||
+        proxy_info.mipLevels != swapchain->create_info.mipCount ||
+        proxy_info.arrayLayers != swapchain->create_info.arraySize || proxy_info.samples != VK_SAMPLE_COUNT_1_BIT ||
+        proxy_info.tiling != VK_IMAGE_TILING_OPTIMAL ||
+        !(proxy_info.usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || staged->proxy_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+      WARN("Staged-color proxy %u does not exactly match host copy contract: format %d/%d, extent %ux%u, "
+           "mips %u, layers %u, samples %#x, tiling %d, usage %#x, layout %d\n",
+           i, proxy_info.format, expected_format, proxy_info.extent.width, proxy_info.extent.height,
+           proxy_info.mipLevels, proxy_info.arrayLayers, proxy_info.samples, proxy_info.tiling, proxy_info.usage,
+           staged->proxy_layout);
+      goto fail;
+    }
+
+    staged->host_image = host_images[i].image;
+    if (record_staged_color_copy(swapchain, i, &proxy_info) != VK_SUCCESS) {
+      WARN("Cannot record staged-color copy for image %u\n", i);
+      goto fail;
+    }
+  }
+
+  /*
+   * DXVK tracks each ordinary proxy's canonical layout, but a never-used image
+   * still physically starts UNDEFINED. Initialize it through DXVK so both its
+   * tracker and the physical image reach that layout, then drain the queued
+   * transitions before returning the textures to the application.
+   */
+  EnterCriticalSection(&session->swapchain_destroy_lock);
+  for (i = 0; i < image_count; i++) {
+    VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .levelCount = swapchain->create_info.mipCount,
+        .layerCount = swapchain->create_info.arraySize,
+    };
+    wine_XrStagedColorImage *staged = &swapchain->staged_color_images[i];
+    instance->dxvk_device->lpVtbl->TransitionSurfaceLayout(instance->dxvk_device, staged->proxy_surface, &range,
+                                                           VK_IMAGE_LAYOUT_UNDEFINED, staged->proxy_layout);
+  }
+  instance->dxvk_device->lpVtbl->FlushRenderingCommands(instance->dxvk_device);
+  LeaveCriticalSection(&session->swapchain_destroy_lock);
+
+  *out_images = images;
+  return XR_SUCCESS;
+
+fail:
+  for (i = 0; i < initialized; i++) {
+    if (swapchain->staged_color_images[i].copy_command)
+      vkFreeCommandBuffers(instance->vk_device, swapchain->staged_color_command_pool, 1,
+                           &swapchain->staged_color_images[i].copy_command);
+    if (swapchain->staged_color_images[i].proxy_surface)
+      IDXGIVkInteropSurface_Release(swapchain->staged_color_images[i].proxy_surface);
+    if (images[i].texture)
+      ID3D11Texture2D_Release(images[i].texture);
+  }
+  if (swapchain->staged_color_query_pool)
+    vkDestroyQueryPool(instance->vk_device, swapchain->staged_color_query_pool, NULL);
+  if (swapchain->staged_color_command_pool)
+    vkDestroyCommandPool(instance->vk_device, swapchain->staged_color_command_pool, NULL);
+  free(swapchain->staged_color_images);
+  free(swapchain->acquired);
+  free(swapchain->acquired_indices);
+  free(images);
+  swapchain->staged_color_images = NULL;
+  swapchain->acquired = NULL;
+  swapchain->acquired_indices = NULL;
+  swapchain->staged_color_query_pool = VK_NULL_HANDLE;
+  swapchain->staged_color_command_pool = VK_NULL_HANDLE;
+  return XR_ERROR_RUNTIME_FAILURE;
+}
+
 XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                                            uint32_t imageCapacityInput,
                                            uint32_t *imageCountOutput,
@@ -1249,6 +1643,16 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
       XrSwapchainImageD3D11KHR *our_d3d11;
       D3D11_TEXTURE2D_DESC1 desc;
 
+      if (wine_swapchain->staged_color) {
+        params.result = create_staged_d3d11_images(wine_swapchain, our_vk, image_count, &our_d3d11);
+        if (params.result != XR_SUCCESS) {
+          free(our_vk);
+          return params.result;
+        }
+        wine_swapchain->images = (XrSwapchainImageBaseHeader *)our_d3d11;
+        goto d3d11_images_ready;
+      }
+
       desc.Width = wine_swapchain->create_info.width;
       desc.Height = wine_swapchain->create_info.height;
       desc.MipLevels = wine_swapchain->create_info.mipCount;
@@ -1282,6 +1686,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
         TRACE("Successfully allocated texture %p\n", our_d3d11[i].texture);
       }
       wine_swapchain->images = (XrSwapchainImageBaseHeader *)our_d3d11;
+d3d11_images_ready:;
     } else if (wine_swapchain->session->session_type == SESSION_TYPE_D3D12) {
       XrSwapchainImageD3D12KHR *our_d3d12;
       D3D12_RESOURCE_DESC1 desc;
@@ -1424,11 +1829,12 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
       .index = index,
   };
   NTSTATUS _status;
+  const BOOL track_acquired = wine_instance->d3d12_device || wine_swapchain->staged_color;
 
   TRACE("%p, %p, %p image count %d, acquired %d\n", swapchain, acquireInfo, index, wine_swapchain->image_count,
         wine_swapchain->acquired_count);
 
-  if (wine_instance->d3d12_device && wine_swapchain->acquired_count >= wine_swapchain->image_count)
+  if (track_acquired && wine_swapchain->acquired_count >= wine_swapchain->image_count)
   {
       WARN("Application has acquired all images but still tries to acquire more.\n");
       return XR_ERROR_CALL_ORDER_INVALID;
@@ -1439,13 +1845,14 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
   _status = UNIX_CALL(xrAcquireSwapchainImage, &params);
   assert(!_status && "xrAcquireSwapchainImage");
 
-  if (!wine_instance->d3d12_device) {
+  if (!track_acquired) {
     unlock_d3d_queue(wine_instance, FALSE);
     return params.result;
   }
 
   if (params.result == XR_SUCCESS) {
-    if (!wine_swapchain->acquired[*index] && wine_swapchain->cmd_acquire[*index] != VK_NULL_HANDLE) {
+    if (wine_instance->d3d12_device && !wine_swapchain->acquired[*index] &&
+        wine_swapchain->cmd_acquire[*index] != VK_NULL_HANDLE) {
       VkSubmitInfo submit_info = {
           .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
           .commandBufferCount = 1,
@@ -1477,10 +1884,11 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
       .releaseInfo = releaseInfo,
   };
   NTSTATUS _status;
+  const BOOL track_acquired = wine_instance->d3d12_device || wine_swapchain->staged_color;
 
   TRACE("%p, %p\n", swapchain, releaseInfo);
 
-  if (wine_instance->d3d12_device && !wine_swapchain->acquired_count)
+  if (track_acquired && !wine_swapchain->acquired_count)
   {
     WARN("Application tried to release a swapchain image without having acquired it first.\n");
     return XR_ERROR_CALL_ORDER_INVALID;
@@ -1488,10 +1896,26 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
 
   lock_d3d_queue(wine_instance, TRUE);
 
-  if (wine_instance->d3d12_device)
+  if (track_acquired)
   {
     index = wine_swapchain->acquired_indices[wine_swapchain->acquired_start];
-    if (wine_swapchain->cmd_release[index] != VK_NULL_HANDLE) {
+    if (wine_swapchain->staged_color) {
+      VkResult submit_result;
+      VkSubmitInfo submit_info = {
+          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+          .commandBufferCount = 1,
+          .pCommandBuffers = &wine_swapchain->staged_color_images[index].copy_command,
+      };
+      collect_staged_color_timestamp(wine_swapchain, index);
+      submit_result = vkQueueSubmit(wine_instance->vk_queue, 1, &submit_info, VK_NULL_HANDLE);
+      if (submit_result != VK_SUCCESS) {
+        WARN("Staged-color copy submission failed for image %u: %d\n", index, submit_result);
+        unlock_d3d_queue(wine_instance, TRUE);
+        return XR_ERROR_RUNTIME_FAILURE;
+      }
+      wine_swapchain->staged_color_images[index].copy_timestamp_pending =
+          wine_swapchain->staged_color_query_pool != VK_NULL_HANDLE;
+    } else if (wine_instance->d3d12_device && wine_swapchain->cmd_release[index] != VK_NULL_HANDLE) {
       VkSubmitInfo submit_info = {
           .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
           .commandBufferCount = 1,
@@ -1504,12 +1928,13 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
 
   _status = UNIX_CALL(xrReleaseSwapchainImage, &params);
   assert(!_status && "xrReleaseSwapchainImage");
-  if (!wine_instance->d3d12_device) {
+  if (!track_acquired) {
     unlock_d3d_queue(wine_instance, TRUE);
     return params.result;
   }
 
-  if (params.result != XR_SUCCESS && wine_swapchain->cmd_release[index] != VK_NULL_HANDLE) {
+  if (params.result != XR_SUCCESS && wine_instance->d3d12_device &&
+      wine_swapchain->cmd_release[index] != VK_NULL_HANDLE) {
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,

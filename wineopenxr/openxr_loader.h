@@ -29,6 +29,8 @@ static const char WINE_VULKAN_DEVICE_VARIABLE[] = "__WINE_OPENXR_VK_DEVICE_EXTEN
 
 struct IDXGIVkInteropDevice2;
 typedef struct IDXGIVkInteropDevice2 IDXGIVkInteropDevice2;
+struct IDXGIVkInteropSurface;
+typedef struct IDXGIVkInteropSurface IDXGIVkInteropSurface;
 typedef struct ID3D12DXVKInteropDevice ID3D12DXVKInteropDevice;
 typedef struct ID3D12DXVKInteropDevice2 ID3D12DXVKInteropDevice2;
 
@@ -83,6 +85,11 @@ typedef struct {
   XrSession host_session;
   wine_XrInstance *instance;
   uint32_t session_type;
+  ID3D11Device *d3d11_device;
+  BOOL staged_color_enabled;
+  uint32_t vk_queue_family_index;
+  float timestamp_period;
+  uint32_t timestamp_valid_bits;
   CRITICAL_SECTION swapchain_destroy_lock;
   struct list entry;
   uint32_t composition_layer_count;
@@ -99,6 +106,15 @@ static inline wine_XrSession *wine_session_from_handle(XrSession handle) {
 }
 
 typedef struct {
+  VkImage host_image;
+  VkImage proxy_image;
+  VkImageLayout proxy_layout;
+  IDXGIVkInteropSurface *proxy_surface;
+  VkCommandBuffer copy_command;
+  BOOL copy_timestamp_pending;
+} wine_XrStagedColorImage;
+
+typedef struct {
   XrSwapchain host_swapchain;
   wine_XrSession *session;
   XrSwapchainImageBaseHeader *images;
@@ -110,6 +126,14 @@ typedef struct {
   XrSwapchainCreateInfo create_info;
   VkCommandBuffer *cmd_release;
   VkCommandBuffer *cmd_acquire;
+
+  BOOL staged_color;
+  wine_XrStagedColorImage *staged_color_images;
+  VkCommandPool staged_color_command_pool;
+  VkQueryPool staged_color_query_pool;
+  uint64_t staged_color_copy_count;
+  double staged_color_copy_total_ns;
+  double staged_color_copy_max_ns;
 } wine_XrSwapchain;
 
 static inline wine_XrSwapchain *wine_swapchain_from_handle(XrSwapchain handle) {
