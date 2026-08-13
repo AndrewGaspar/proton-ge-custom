@@ -209,11 +209,20 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("tr -d '\\r'", runner)
         self.assertIn('grep -Fqx "$expected"', runner)
 
+        readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
+        attended_commands = readme.split("OPENXR_LOADER_DLL=", 1)[1].split("```", 1)[0]
+        self.assertLess(attended_commands.index("run-guarded.sh draw-depth"),
+                        attended_commands.index("run-guarded.sh draw-native-pair"))
+        self.assertLess(attended_commands.index("run-guarded.sh draw-native-pair"),
+                        attended_commands.index("run-guarded.sh draw-color"))
+
         build = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/build.sh").read_text()
         self.assertIn("OPENXR_LOADER_DLL", build)
         self.assertNotIn("BONELAB", build)
         self.assertNotIn("/tmp/codex-proton", build)
-        self.assertIn("-Wpedantic -static", build)
+        self.assertIn("-Wpedantic -Werror", build)
+        self.assertIn("-Wno-missing-field-initializers", build)
+        self.assertIn("-Wno-cast-function-type -static", build)
 
         walkabout_runner = (
             PROTON_ROOT
