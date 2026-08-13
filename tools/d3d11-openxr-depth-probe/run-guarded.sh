@@ -23,6 +23,7 @@ case "$stage" in
   *) echo "usage: $0 [bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity] [probe-dir]" >&2; exit 2 ;;
 esac
 
+umu_env=(env -u HYPRLAND_INSTANCE_SIGNATURE)
 case "$stage" in
   bootstrap) stage_timeout=30s ;;
   enumerate|views|clear|sample) stage_timeout=45s ;;
@@ -56,6 +57,7 @@ case "$stage" in
       echo "FAIL: live Hyprland instance does not report user presence" >&2
       exit 1
     }
+    umu_env+=(HYPRLAND_INSTANCE_SIGNATURE="$instance_signature")
     echo "PASS: live Hyprland instance $instance_signature is focused, visible, and present"
     ;;
 esac
@@ -71,7 +73,7 @@ set +e
 (
   cd "$probe_dir"
   timeout --kill-after=5s "$stage_timeout" \
-    env WINEPREFIX="$compat_data_dir" \
+    "${umu_env[@]}" WINEPREFIX="$compat_data_dir" \
         PROTONPATH="$proton_dir" \
         GAMEID=999999999 \
         UMU_USE_STEAM=0 \
