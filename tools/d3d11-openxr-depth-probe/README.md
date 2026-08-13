@@ -125,6 +125,17 @@ passes the Meta Proton compatibility-data directory to UMU, not its inner
 selects the existing `pfx` child. The runner does not start, restart, or deploy
 WiVRn or kill any Wine process.
 
+The runner records WiVRn from a journal cursor through a two-second teardown
+drain. New WiVRn builds identify every asynchronous client-fence warning by IPC
+client, PID, application, frame, and consecutive timeout count. The runner
+selects the final probe client created after Proton/xrizer and wineopenxr's
+temporary preflight clients, ignores warnings from HypXRland and hypxrhud, and
+fails only a terminal fence error or five consecutive 100 ms waits attributed
+to that client. A legacy untagged warning is reported as attribution
+unavailable rather than incorrectly blamed on the probe. Kernel Xids, a
+missing PASS marker, nonzero process status, or incomplete cleanup still fail
+independently.
+
 The `bootstrap` stage runs the in-process VR preflight but exits before the
 probe's OpenXR or D3D11 initialization. Proton's VR preflight can still
 initialize its own runtime helpers and enumerate graphics devices. The build
@@ -222,8 +233,9 @@ ALLOW_LIVE_WALKABOUT=1 \
 ```
 
 `run` performs exactly one bounded Heroic protocol launch. It snapshots the
-kernel Xid count, watches for Unity's WiVRn connection and client-fence
-timeouts, stops immediately on either failure, and finally stops only the
+kernel Xid count, watches for Unity's WiVRn connection and tagged terminal or
+persistent Unity client-fence waits, stops immediately on either failure, and
+finally stops only the
 exact Meta prefix with GE-Proton's own wineserver. Logs, the final `Player.log`,
 process snapshots, and a machine-readable classification are retained below
 `${XDG_STATE_HOME:-$HOME/.local/state}/hypxrland/walkabout-d32s8`.

@@ -64,8 +64,11 @@ esac
 
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
 started=$(date --iso-8601=seconds)
+journal_cursor=$(journalctl --user -u wivrn.service -n 0 --show-cursor --no-pager |
+  sed -n 's/^-- cursor: //p' | tail -n 1)
 stdout_log="$probe_dir/d3d11-openxr-depth-probe.stdout.log"
 stderr_log="$probe_dir/d3d11-openxr-depth-probe.stderr.log"
+wivrn_log="$probe_dir/d3d11-openxr-depth-probe.wivrn.log"
 : > "$stdout_log"
 : > "$stderr_log"
 
@@ -83,6 +86,12 @@ set +e
 )
 status=$?
 set -e
+
+# A disconnect callback precedes compositor teardown. Give the per-client wait
+# thread time to emit its terminal/recovery result before taking the journal.
+sleep 2
+journalctl --user -u wivrn.service --after-cursor "$journal_cursor" \
+  -o short-precise --no-pager >"$wivrn_log" || true
 
 after=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
 if (( after > before )); then
@@ -121,5 +130,29 @@ if ! tr -d '\r' < "$stdout_log" | grep -Fqx "$expected"; then
   echo "FAIL: stage $stage did not write its expected PASS marker: $expected" >&2
   exit 1
 fi
+
+case "$stage" in
+  draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity)
+    for marker in \
+      'cleanup: destroying OpenXR session' \
+      'cleanup: releasing D3D11 context and device' \
+      'cleanup: destroying OpenXR instance' \
+      'cleanup: unloading OpenXR loader' \
+      'cleanup: complete'; do
+      grep -Fq "$marker" "$stderr_log" || {
+        echo "FAIL: stage $stage omitted cleanup marker: $marker" >&2
+        exit 1
+      }
+    done
+
+    set +e
+    python3 "$probe_dir/attribute_fence_log.py" "$wivrn_log"
+    attribution_status=$?
+    set -e
+    if (( attribution_status == 1 )); then
+      exit 98
+    fi
+    ;;
+esac
 
 exit 0
