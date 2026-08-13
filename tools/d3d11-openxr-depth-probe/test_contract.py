@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib.util
 import os
 import pathlib
 import sys
@@ -17,6 +18,13 @@ monado_source = arguments.monado_src or os.environ.get("MONADO_SRC")
 if not monado_source:
     raise SystemExit("set MONADO_SRC or pass --monado-src PATH")
 MONADO_ROOT = pathlib.Path(monado_source).resolve()
+
+attribute_spec = importlib.util.spec_from_file_location(
+    "attribute_fence_log",
+    pathlib.Path(__file__).with_name("attribute_fence_log.py"),
+)
+attribute_fence_log = importlib.util.module_from_spec(attribute_spec)
+attribute_spec.loader.exec_module(attribute_fence_log)
 
 ATTACHMENT = "DEPTH_STENCIL_ATTACHMENT_OPTIMAL"
 READ_ONLY = "DEPTH_STENCIL_READ_ONLY_OPTIMAL"
@@ -59,6 +67,43 @@ class LayoutState:
 
 
 class D32S8ImportContractTest(unittest.TestCase):
+    def test_fence_attribution_ignores_other_clients(self):
+        log = """
+ id: 1
+ application_name: 'Hyprland'
+ id: 13
+ application_name: 'd3d11-openxr-depth-probe'
+ Client fence attribution enabled: client=13 pid=42 app='d3d11-openxr-depth-probe'
+ Waiting on client fence timed out > 100ms! client=1 pid=1847 app='Hyprland' frame=4 timeout_count=20
+"""
+        self.assertEqual(attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5), 0)
+
+    def test_fence_attribution_rejects_persistent_target_wait(self):
+        log = """
+ id: 13
+ application_name: 'd3d11-openxr-depth-probe'
+ Client fence attribution enabled: client=13 pid=42 app='d3d11-openxr-depth-probe'
+ Waiting on client fence timed out > 100ms! client=13 pid=42 app='d3d11-openxr-depth-probe' frame=7 timeout_count=5
+"""
+        self.assertEqual(attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5), 1)
+
+    def test_fence_attribution_rejects_terminal_target_wait(self):
+        log = """
+ id: 13
+ application_name: 'd3d11-openxr-depth-probe'
+ Client fence attribution enabled: client=13 pid=42 app='d3d11-openxr-depth-probe'
+ Fence waiting failed! client=13 pid=42 app='d3d11-openxr-depth-probe' frame=7 result=-2
+"""
+        self.assertEqual(attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5), 1)
+
+    def test_fence_attribution_flags_legacy_untagged_log(self):
+        log = """
+ id: 13
+ application_name: 'd3d11-openxr-depth-probe'
+ Waiting on client fence timed out > 100ms!
+"""
+        self.assertEqual(attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5), 2)
+
     def test_two_dsv_srv_cycles_keep_actual_and_tracked_layouts_equal(self):
         state = LayoutState()
 
@@ -80,6 +125,8 @@ class D32S8ImportContractTest(unittest.TestCase):
         dxvk = (PROTON_ROOT / "dxvk/src/d3d11/d3d11_texture.cpp").read_text()
         probe = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/main.cpp").read_text()
         monado = (MONADO_ROOT / "src/xrt/compositor/client/comp_vk_client.c").read_text()
+        multi = (MONADO_ROOT / "src/xrt/compositor/multi/comp_multi_compositor.c").read_text()
+        ipc_server = (MONADO_ROOT / "src/xrt/ipc/server/ipc_server_handler.c").read_text()
         support = (MONADO_ROOT / "src/xrt/auxiliary/vk/vk_compositor_flags.c").read_text()
         allocator = (MONADO_ROOT / "src/xrt/auxiliary/vk/vk_image_allocator.c").read_text()
 
@@ -126,6 +173,10 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("vkImage != VK_NULL_HANDLE", dxvk)
         self.assertIn("VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL", dxvk)
         self.assertIn("trackedLayout = imageInfo.layout;", dxvk)
+        self.assertIn("Client fence attribution enabled: client=%u", multi)
+        self.assertIn("timeout_count=%u", multi)
+        self.assertIn("Client fence recovered after %u timeout(s)", multi)
+        self.assertIn("server_xsi.debug_client_id = ics->client_state.id", ipc_server)
         self.assertIn("importImage(imageInfo, vkImage, trackedLayout", dxvk)
         self.assertIn("dsvDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;", probe)
         self.assertIn("srvDesc.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;", probe)
@@ -150,6 +201,9 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("bool depthAcquired = false;", probe)
         self.assertIn("cleanup: destroying OpenXR session", probe)
         self.assertIn("cleanup_xr_d3d(xr, session, context, device, instance, loader)", probe)
+        self.assertIn('log_phase("draw-depth acquire/wait begin")', probe)
+        self.assertIn('"draw-depth event fence complete"', probe)
+        self.assertIn('"draw-depth release complete"', probe)
         frame_loop = probe.split("for (uint32_t attempt = 0;", 1)[1].split(
             'std::printf("completed %u rendered projection frames', 1
         )[0]
@@ -208,6 +262,10 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertLess(runner.index('after=$(journalctl'), runner.index('if (( status != 0 ))'))
         self.assertIn("tr -d '\\r'", runner)
         self.assertIn('grep -Fqx "$expected"', runner)
+        self.assertIn("--show-cursor", runner)
+        self.assertIn("sleep 2", runner)
+        self.assertIn("attribute_fence_log.py", runner)
+        self.assertIn("cleanup: complete", runner)
 
         readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
         attended_commands = readme.split("OPENXR_LOADER_DLL=", 1)[1].split("```", 1)[0]
@@ -223,6 +281,7 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("-Wpedantic -Werror", build)
         self.assertIn("-Wno-missing-field-initializers", build)
         self.assertIn("-Wno-cast-function-type -static", build)
+        self.assertIn("attribute_fence_log.py", build)
 
         walkabout_runner = (
             PROTON_ROOT
@@ -233,7 +292,8 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("latest presence event does not say the headset is worn", walkabout_runner)
         self.assertIn("before_xids=", walkabout_runner)
         self.assertIn("application_name: 'Unity'", walkabout_runner)
-        self.assertIn("Waiting on client fence timed out", walkabout_runner)
+        self.assertIn("timeout_count=([5-9]|[1-9][0-9]+)", walkabout_runner)
+        self.assertIn("app='Unity'", walkabout_runner)
         self.assertIn("SECONDS - unity_connected_at >= 20", walkabout_runner)
         self.assertIn('WINEPREFIX="$prefix_dir" "$wineserver" -k', walkabout_runner)
         self.assertIn("exit 99", walkabout_runner)

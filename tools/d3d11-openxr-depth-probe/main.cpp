@@ -19,6 +19,21 @@
 #include <utility>
 #include <vector>
 
+static ULONGLONG g_probeStartMs = 0;
+
+static void log_phase(const char *phase) {
+  SYSTEMTIME now{};
+  GetSystemTime(&now);
+  std::fprintf(stderr,
+               "phase: utc=%04u-%02u-%02uT%02u:%02u:%02u.%03uZ "
+               "elapsed_ms=%llu %s\n",
+               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
+               now.wSecond, now.wMilliseconds,
+               static_cast<unsigned long long>(GetTickCount64() -
+                                               g_probeStartMs),
+               phase);
+}
+
 template <typename T>
 static void
 release(T *& object)
@@ -578,12 +593,15 @@ static bool draw_local_depth_only(
     uint32_t height) {
   uint32_t depthIndex = 0;
   bool acquired = false;
+  log_phase("draw-depth acquire/wait begin");
   if (!acquire_swapchain_image(xr, depth.handle, depthIndex, acquired)) {
     if (acquired)
       release_swapchain_image(xr, depth.handle);
     return false;
   }
+  log_phase("draw-depth acquire/wait complete");
 
+  log_phase("draw-depth commands begin");
   context->ClearDepthStencilView(
       depth.dsv[depthIndex], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
   D3D11_VIEWPORT viewport{};
@@ -598,9 +616,16 @@ static bool draw_local_depth_only(
   context->PSSetShader(nullptr, nullptr, 0);
   context->Draw(3, 0);
   context->OMSetRenderTargets(0, nullptr, nullptr);
+  log_phase("draw-depth commands submitted to D3D11");
 
+  log_phase("draw-depth event fence begin");
   const bool fenceOk = wait_for_gpu(device, context);
+  log_phase(fenceOk ? "draw-depth event fence complete"
+                    : "draw-depth event fence failed");
+  log_phase("draw-depth release begin");
   const bool releaseOk = release_swapchain_image(xr, depth.handle);
+  log_phase(releaseOk ? "draw-depth release complete"
+                      : "draw-depth release failed");
   return fenceOk && releaseOk;
 }
 
@@ -976,25 +1001,25 @@ static bool cleanup_xr_d3d(const SXrFunctions &xr, XrSession session,
                            ID3D11DeviceContext *&context,
                            ID3D11Device *&device, XrInstance instance,
                            HMODULE &loader) {
-  std::fprintf(stderr, "cleanup: destroying OpenXR session\n");
+  log_phase("cleanup: destroying OpenXR session");
   const bool sessionOk =
       xr_ok(xr.destroySession(session), "xrDestroySession(cleanup)");
 
-  std::fprintf(stderr, "cleanup: releasing D3D11 context and device\n");
+  log_phase("cleanup: releasing D3D11 context and device");
   release(context);
   release(device);
 
-  std::fprintf(stderr, "cleanup: destroying OpenXR instance\n");
+  log_phase("cleanup: destroying OpenXR instance");
   const bool instanceOk =
       xr_ok(xr.destroyInstance(instance), "xrDestroyInstance(cleanup)");
 
-  std::fprintf(stderr, "cleanup: unloading OpenXR loader\n");
+  log_phase("cleanup: unloading OpenXR loader");
   const bool loaderOk = FreeLibrary(loader) != FALSE;
   loader = nullptr;
   if (!loaderOk)
     std::fprintf(stderr, "FAIL: FreeLibrary(openxr_loader.dll) returned %lu\n",
                  GetLastError());
-  std::fprintf(stderr, "cleanup: complete\n");
+  log_phase("cleanup: complete");
   return sessionOk && instanceOk && loaderOk;
 }
 
@@ -1005,6 +1030,8 @@ int main(int argc, char ** argv)
         return 3;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
+    g_probeStartMs = GetTickCount64();
+    log_phase("process start");
 
     const char * stage = argc > 1 ? argv[1] : "enumerate";
     std::printf("probe stage: %s\n", stage);
@@ -1030,8 +1057,10 @@ int main(int argc, char ** argv)
         return 2;
     }
 
+    log_phase("Wine VR registry bootstrap begin");
     if (!initialize_vr_registry())
         return 1;
+    log_phase("Wine VR registry bootstrap complete");
 
     if (std::strcmp(stage, "bootstrap") == 0)
     {
@@ -1045,6 +1074,7 @@ int main(int argc, char ** argv)
                  GetLastError());
         return 1;
     }
+    log_phase("OpenXR loader loaded");
 
     SXrFunctions xr{};
   xr.getInstanceProcAddr = reinterpret_cast<PFN_xrGetInstanceProcAddr>(
@@ -1091,7 +1121,9 @@ int main(int argc, char ** argv)
   instanceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
   instanceInfo.enabledExtensionNames = extensions.data();
     XrInstance instance = XR_NULL_HANDLE;
+    log_phase("xrCreateInstance begin");
     XR_CHECK(xr.createInstance(&instanceInfo, &instance));
+    log_phase("xrCreateInstance complete");
 
     if (!load_xr(xr, instance, "xrDestroyInstance", xr.destroyInstance) ||
         !load_xr(xr, instance, "xrGetSystem", xr.getSystem) ||
@@ -1136,6 +1168,7 @@ int main(int argc, char ** argv)
     ID3D11DeviceContext * context = nullptr;
     if (create_matching_device(requirements.adapterLuid, &device, &context) != 0)
         return 1;
+    log_phase("D3D11 device creation complete");
 
     XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
     binding.device = device;
@@ -1143,7 +1176,9 @@ int main(int argc, char ** argv)
     sessionInfo.next = &binding;
     sessionInfo.systemId = system;
     XrSession session = XR_NULL_HANDLE;
+    log_phase("xrCreateSession begin");
     XR_CHECK(xr.createSession(instance, &sessionInfo, &session));
+    log_phase("xrCreateSession complete");
 
     uint32_t formatCount = 0;
     XR_CHECK(xr.enumerateFormats(session, 0, &formatCount, nullptr));
@@ -1194,9 +1229,11 @@ int main(int argc, char ** argv)
     swapchainInfo.mipCount = 1;
     const bool createViews = std::strcmp(stage, "enumerate") != 0;
     SDepthSwapchain depth;
+  log_phase("depth swapchain create/enumerate/views begin");
   if (!create_depth_swapchain(xr, session, device, swapchainInfo, createViews,
                               depth))
         return 1;
+  log_phase("depth swapchain create/enumerate/views complete");
 
     const uint32_t imageCount = static_cast<uint32_t>(depth.images.size());
     std::printf("enumerated %u D3D11 images\n", imageCount);

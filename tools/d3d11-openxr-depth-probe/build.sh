@@ -23,3 +23,6 @@ x86_64-w64-mingw32-g++ \
   -ladvapi32 -ld3d11 -ld3dcompiler -ldxgi -ldxguid
 
 cp "$loader_dll" "$out_dir/openxr_loader.dll"
+cp "$source_dir/run-guarded.sh" "$out_dir/run-guarded.sh"
+cp "$source_dir/attribute_fence_log.py" "$out_dir/attribute_fence_log.py"
+cp "$source_dir/README.md" "$out_dir/README.md"
