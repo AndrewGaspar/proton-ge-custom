@@ -27,15 +27,16 @@ Stages are intentionally ordered from lowest risk to highest:
 8. `discard`: run `recreate`, but call `ID3D11DeviceContext1::DiscardView` on
    every acquired DSV before clearing it. This covers Oculus XR Plugin's
    `Optimize Buffer Discards: Yes` path separately.
-9. `draw-color`: draw to a real cross-GPU RGBA8 color swapchain without a
-   depth attachment. This isolates the imported color attachment and its
-   FOREIGN ownership/layout path.
-10. `draw-depth`: execute a depth-writing draw against the client-local D32S8
+9. `draw-depth`: execute a depth-writing draw against the client-local D32S8
    swapchain with no color attachment. This differs from `clear` by exercising
-   an actual graphics pipeline and depth tests.
-11. `draw-native-pair`: bind an ordinary DXVK-created NVIDIA color texture
+   an actual graphics pipeline and depth tests. Rerun it first after changing
+   probe cleanup so its completed teardown is established before adding color.
+10. `draw-native-pair`: bind an ordinary DXVK-created NVIDIA color texture
    alongside the borrowed client-local D32S8 swapchain image. This separates
    mixed attachment provenance from the format and render-pipeline contract.
+11. `draw-color`: draw to a real cross-GPU RGBA8 color swapchain without a
+   depth attachment. This isolates the imported color attachment and its
+   FOREIGN ownership/layout path.
 12. `draw-bind`: acquire and bind the imported cross-GPU color RTV and local
    D32S8 DSV together, then unbind without a clear or Draw. This determines
    whether mere D3D11 binding/lifecycle is safe; DXVK may defer actual dynamic
@@ -65,9 +66,10 @@ returns 99 after any new NVIDIA Xid. Each stage also has a bounded timeout that
 terminates only the probe's UMU process group; the post-run Xid check still runs
 after a timeout. It never broadly kills Wine or a wineserver.
 
-Before every draw or frame stage, the runner removes any inherited
+Before every draw or frame stage, the runner ignores any inherited
 `HYPRLAND_INSTANCE_SIGNATURE`, resolves `hyprctl instances`, requires exactly
-one live compositor, and queries that explicit signature. It refuses to render
+one live compositor, and passes that explicit signature to both its status
+query and the UMU/Proton process. It refuses to render
 unless the live OpenXR session is focused, visible, and reports user presence.
 The probe logs each OpenXR/D3D cleanup phase before printing its PASS marker, so
 a successful GPU fence cannot be mistaken for a fully completed process.
@@ -82,9 +84,9 @@ bash tools/d3d11-openxr-depth-probe/run-guarded.sh sample
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh teardown
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh recreate
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh discard
-bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-color
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-depth
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-native-pair
+bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-color
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-bind
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw-dsv-disabled
 bash tools/d3d11-openxr-depth-probe/run-guarded.sh draw

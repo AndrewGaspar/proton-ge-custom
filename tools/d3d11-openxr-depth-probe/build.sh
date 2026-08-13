@@ -14,7 +14,8 @@ fi
 mkdir -p "$out_dir"
 
 x86_64-w64-mingw32-g++ \
-  -std=c++20 -O2 -g -Wall -Wextra -Wpedantic -static \
+  -std=c++20 -O2 -g -Wall -Wextra -Wpedantic -Werror \
+  -Wno-missing-field-initializers -Wno-cast-function-type -static \
   -I"$proton_root/wineopenxr" \
   -I"$proton_root/Vulkan-Headers/include" \
   "$source_dir/main.cpp" \
