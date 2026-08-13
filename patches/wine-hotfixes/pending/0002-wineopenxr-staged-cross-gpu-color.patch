@@ -1,6 +1,6 @@
 # Generated against Wine 1729f00e17e879f98f9df1f2bca86bc5d21a65df
 # after 0001-decouple-wineopenxr-from-steamvr-and-integrate-it-in.patch.
-# Contract: staged-color command pools are swapchain-owned, not session-owned.
+# Contract: staged-color command pools are swapchain-owned, and PE/Unix are a matched private-ABI pair.
 diff --git i/dlls/wineopenxr/dxvk-interop.h w/dlls/wineopenxr/dxvk-interop.h
 index 946aa1e1203..ddadb36a20b 100644
 --- i/dlls/wineopenxr/dxvk-interop.h
@@ -48,8 +48,28 @@ index 946aa1e1203..ddadb36a20b 100644
      END_INTERFACE
  } IDXGIVkInteropDevice2Vtbl;
  
+diff --git i/dlls/wineopenxr/openxr.c w/dlls/wineopenxr/openxr.c
+index 958bddbcec4..bfc54be54c1 100644
+--- i/dlls/wineopenxr/openxr.c
++++ w/dlls/wineopenxr/openxr.c
+@@ -395,6 +395,15 @@ NTSTATUS init_openxr(void *args) {
+   Dl_info info;
+   void *unix_handle;
+ 
++  if (params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC) {
++    ERR("PE/Unix ABI magic mismatch: PE %#llx, Unix %#llx.\n",
++        (unsigned long long)params->pe_abi_magic,
++        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC);
++    return STATUS_REVISION_MISMATCH;
++  }
++  params->unix_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC;
++  params->unix_call_count = unix_count;
++
+   status = NtQueryVirtualMemory(GetCurrentProcess(), params->winevulkan,
+                                 (MEMORY_INFORMATION_CLASS)1000 /*MemoryWineUnixFuncs*/, &unix_funcs, sizeof(unix_funcs),
+                                 NULL);
 diff --git i/dlls/wineopenxr/openxr_loader.c w/dlls/wineopenxr/openxr_loader.c
-index ebb0cf1a20c..538a82f8779 100644
+index ebb0cf1a20c..3854ee24307 100644
 --- i/dlls/wineopenxr/openxr_loader.c
 +++ w/dlls/wineopenxr/openxr_loader.c
 @@ -118,6 +118,8 @@ static void ensure_vr_registry_from_xr(void)
@@ -79,7 +99,29 @@ index ebb0cf1a20c..538a82f8779 100644
  static wine_XrSession *get_wrapped_XrSession(XrSession native) {
    wine_XrSession *cursor;
  
-@@ -730,6 +743,9 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
+@@ -344,10 +357,20 @@ done:
+ }
+ 
+ static BOOL WINAPI wine_openxr_unix_init(INIT_ONCE *once, void *param, void **context) {
+-  struct init_openxr_params params = {.winevulkan = LoadLibraryA("winevulkan.dll")};
++  struct init_openxr_params params = {
++      .winevulkan = LoadLibraryA("winevulkan.dll"),
++      .pe_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC,
++  };
+   if (__wine_init_unix_call() || UNIX_CALL(init, &params)) {
+     return FALSE;
+   }
++  if (params.unix_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC || params.unix_call_count != unix_count) {
++    ERR("PE/Unix ABI handshake failed: Unix magic %#llx, calls %llu; PE magic %#llx, calls %u.\n",
++        (unsigned long long)params.unix_abi_magic,
++        (unsigned long long)params.unix_call_count,
++        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC, unix_count);
++    return FALSE;
++  }
+   g_vk_create_instance_callback = params.create_instance_callback;
+   g_vk_create_device_callback = params.create_device_callback;
+   return TRUE;
+@@ -730,6 +753,9 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
        }
        case XR_TYPE_GRAPHICS_BINDING_D3D11_KHR: {
          const XrGraphicsBindingD3D11KHR *their_d3d11_binding = (const XrGraphicsBindingD3D11KHR *)createInfo->next;
@@ -89,7 +131,7 @@ index ebb0cf1a20c..538a82f8779 100644
          HRESULT hr;
  
          hr = ID3D11Device_QueryInterface(their_d3d11_binding->device, &IID_IDXGIVkInteropDevice2,
-@@ -744,19 +760,41 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
+@@ -744,19 +770,41 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
  
          wine_instance->dxvk_device->lpVtbl->GetVulkanHandles(wine_instance->dxvk_device, &our_vk_binding.instance,
                                                               &our_vk_binding.physicalDevice, &our_vk_binding.device);
@@ -133,7 +175,7 @@ index ebb0cf1a20c..538a82f8779 100644
          break;
        }
        case XR_TYPE_GRAPHICS_BINDING_D3D12_KHR: {
-@@ -832,12 +870,15 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
+@@ -832,12 +880,15 @@ XrResult WINAPI xrCreateSession(XrInstance instance, const XrSessionCreateInfo *
  
    if (params.result != XR_SUCCESS) {
      WARN("xrCreateSession failed: %d\n", res);
@@ -149,7 +191,7 @@ index ebb0cf1a20c..538a82f8779 100644
  
    EnterCriticalSection(&session_list_lock);
  
-@@ -863,6 +904,9 @@ XrResult WINAPI xrDestroySession(XrSession session) {
+@@ -863,6 +914,9 @@ XrResult WINAPI xrDestroySession(XrSession session) {
      return params.result;
    }
  
@@ -159,7 +201,7 @@ index ebb0cf1a20c..538a82f8779 100644
    free(wine_session);
    return XR_SUCCESS;
  }
-@@ -1044,6 +1088,24 @@ int64_t map_format_vulkan_to_dxgi(int64_t format) {
+@@ -1044,6 +1098,24 @@ int64_t map_format_vulkan_to_dxgi(int64_t format) {
    }
  }
  
@@ -184,7 +226,7 @@ index ebb0cf1a20c..538a82f8779 100644
  XrResult WINAPI xrEnumerateSwapchainFormats(XrSession session,
                                              uint32_t formatCapacityInput,
                                              uint32_t *formatCountOutput,
-@@ -1145,6 +1207,22 @@ XrResult WINAPI xrCreateSwapchain(XrSession session, const XrSwapchainCreateInfo
+@@ -1145,6 +1217,22 @@ XrResult WINAPI xrCreateSwapchain(XrSession session, const XrSwapchainCreateInfo
      if ((createInfo->usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) && !format_is_depth) {
        WARN("Swapchain has a depth/stencil usage, but it's format is for color\n");
      }
@@ -207,7 +249,7 @@ index ebb0cf1a20c..538a82f8779 100644
    }
  
    _status = UNIX_CALL(xrCreateSwapchain, &params);
-@@ -1182,13 +1260,72 @@ static void release_d3d12_resources(wine_XrSwapchain *swapchain, uint32_t image_
+@@ -1182,13 +1270,72 @@ static void release_d3d12_resources(wine_XrSwapchain *swapchain, uint32_t image_
    free(swapchain->acquired_indices);
  }
  
@@ -280,7 +322,7 @@ index ebb0cf1a20c..538a82f8779 100644
    _status = UNIX_CALL(xrDestroySwapchain, &params);
    assert(!_status && "xrDestroySwapchain");
    if (params.result != XR_SUCCESS) {
-@@ -1197,13 +1334,7 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain) {
+@@ -1197,13 +1344,7 @@ XrResult WINAPI xrDestroySwapchain(XrSwapchain swapchain) {
    }
  
    if (wine_swapchain->image_count) {
@@ -295,7 +337,7 @@ index ebb0cf1a20c..538a82f8779 100644
        release_d3d12_resources(wine_swapchain, wine_swapchain->image_count);
      }
      free(wine_swapchain->images);
-@@ -1286,6 +1417,313 @@ static VkResult record_transition_command(wine_XrInstance *instance,
+@@ -1286,6 +1427,313 @@ static VkResult record_transition_command(wine_XrInstance *instance,
    return vkEndCommandBuffer(*out_cmd);
  }
  
@@ -609,7 +651,7 @@ index ebb0cf1a20c..538a82f8779 100644
  XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
                                             uint32_t imageCapacityInput,
                                             uint32_t *imageCountOutput,
-@@ -1349,11 +1787,21 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
+@@ -1349,11 +1797,21 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
        XrSwapchainImageD3D11KHR *our_d3d11;
        D3D11_TEXTURE2D_DESC1 desc;
  
@@ -632,7 +674,7 @@ index ebb0cf1a20c..538a82f8779 100644
        TRACE("creating dxvk texture with dxgi format %d (%x)\n", desc.Format, desc.Format);
        desc.SampleDesc.Count = wine_swapchain->create_info.sampleCount;
        desc.SampleDesc.Quality = 0;
-@@ -1365,12 +1813,14 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
+@@ -1365,12 +1823,14 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
  
        our_d3d11 = malloc(sizeof(XrSwapchainImageD3D11KHR) * image_count);
        for (i = 0; i < image_count; ++i) {
@@ -648,7 +690,7 @@ index ebb0cf1a20c..538a82f8779 100644
            }
            free(our_d3d11);
            free(our_vk);
-@@ -1380,6 +1830,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
+@@ -1380,6 +1840,7 @@ XrResult WINAPI xrEnumerateSwapchainImages(XrSwapchain swapchain,
          TRACE("Successfully allocated texture %p\n", our_d3d11[i].texture);
        }
        wine_swapchain->images = (XrSwapchainImageBaseHeader *)our_d3d11;
@@ -656,7 +698,7 @@ index ebb0cf1a20c..538a82f8779 100644
      } else if (wine_swapchain->session->session_type == SESSION_TYPE_D3D12) {
        XrSwapchainImageD3D12KHR *our_d3d12;
        D3D12_RESOURCE_DESC1 desc;
-@@ -1522,11 +1973,12 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
+@@ -1522,11 +1983,12 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
        .index = index,
    };
    NTSTATUS _status;
@@ -670,7 +712,7 @@ index ebb0cf1a20c..538a82f8779 100644
    {
        WARN("Application has acquired all images but still tries to acquire more.\n");
        return XR_ERROR_CALL_ORDER_INVALID;
-@@ -1537,13 +1989,14 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
+@@ -1537,13 +1999,14 @@ XrResult WINAPI xrAcquireSwapchainImage(XrSwapchain swapchain,
    _status = UNIX_CALL(xrAcquireSwapchainImage, &params);
    assert(!_status && "xrAcquireSwapchainImage");
  
@@ -687,7 +729,7 @@ index ebb0cf1a20c..538a82f8779 100644
        VkSubmitInfo submit_info = {
            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
            .commandBufferCount = 1,
-@@ -1575,10 +2028,11 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
+@@ -1575,10 +2038,11 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
        .releaseInfo = releaseInfo,
    };
    NTSTATUS _status;
@@ -700,7 +742,7 @@ index ebb0cf1a20c..538a82f8779 100644
    {
      WARN("Application tried to release a swapchain image without having acquired it first.\n");
      return XR_ERROR_CALL_ORDER_INVALID;
-@@ -1586,10 +2040,26 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
+@@ -1586,10 +2050,26 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
  
    lock_d3d_queue(wine_instance, TRUE);
  
@@ -729,7 +771,7 @@ index ebb0cf1a20c..538a82f8779 100644
        VkSubmitInfo submit_info = {
            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
            .commandBufferCount = 1,
-@@ -1602,12 +2072,13 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
+@@ -1602,12 +2082,13 @@ XrResult WINAPI xrReleaseSwapchainImage(XrSwapchain swapchain, const XrSwapchain
  
    _status = UNIX_CALL(xrReleaseSwapchainImage, &params);
    assert(!_status && "xrReleaseSwapchainImage");
@@ -746,7 +788,7 @@ index ebb0cf1a20c..538a82f8779 100644
          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
          .commandBufferCount = 1,
 diff --git i/dlls/wineopenxr/openxr_loader.h w/dlls/wineopenxr/openxr_loader.h
-index 6ff476eb0b6..2260d70517a 100644
+index 6ff476eb0b6..08d0867916c 100644
 --- i/dlls/wineopenxr/openxr_loader.h
 +++ w/dlls/wineopenxr/openxr_loader.h
 @@ -29,6 +29,8 @@ static const char WINE_VULKAN_DEVICE_VARIABLE[] = "__WINE_OPENXR_VK_DEVICE_EXTEN
@@ -758,7 +800,23 @@ index 6ff476eb0b6..2260d70517a 100644
  typedef struct ID3D12DXVKInteropDevice ID3D12DXVKInteropDevice;
  typedef struct ID3D12DXVKInteropDevice2 ID3D12DXVKInteropDevice2;
  
-@@ -83,6 +85,12 @@ typedef struct {
+@@ -38,10 +40,15 @@ struct vk_create_callback_context {
+   XrResult ret;
+ };
+ 
++#define WINEOPENXR_UNIX_ABI_MAGIC UINT64_C(0x575852554e495831)
++
+ struct init_openxr_params {
+   HMODULE winevulkan;
+   UINT64 create_instance_callback;
+   UINT64 create_device_callback;
++  UINT64 pe_abi_magic;
++  UINT64 unix_abi_magic;
++  UINT64 unix_call_count;
+ };
+ 
+ struct is_available_instance_function_openxr_params {
+@@ -83,6 +90,12 @@ typedef struct {
    XrSession host_session;
    wine_XrInstance *instance;
    uint32_t session_type;
@@ -771,7 +829,7 @@ index 6ff476eb0b6..2260d70517a 100644
    struct list entry;
    uint32_t composition_layer_count;
    CompositionLayer *composition_layers;
-@@ -97,6 +105,15 @@ static inline wine_XrSession *wine_session_from_handle(XrSession handle) {
+@@ -97,6 +110,15 @@ static inline wine_XrSession *wine_session_from_handle(XrSession handle) {
    return (wine_XrSession *)(uintptr_t)handle;
  }
  
@@ -787,7 +845,7 @@ index 6ff476eb0b6..2260d70517a 100644
  typedef struct {
    XrSwapchain host_swapchain;
    wine_XrSession *session;
-@@ -109,6 +126,14 @@ typedef struct {
+@@ -109,6 +131,14 @@ typedef struct {
    XrSwapchainCreateInfo create_info;
    VkCommandBuffer *cmd_release;
    VkCommandBuffer *cmd_acquire;

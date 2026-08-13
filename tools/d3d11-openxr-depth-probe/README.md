@@ -68,6 +68,14 @@ swapchain path. It is disabled by default and is intended to testâ€”not assumeâ€
 hypothesis that rendering to an imported linear color image alongside a
 client-local optimal depth image triggers the NVIDIA fault.
 
+The WineOpenXR PE and Unix libraries are one private-ABI pair and must always
+be built and deployed together from the same prepared Wine tree. Public PE
+exports, ELF `NEEDED` entries, and SONAME do not establish compatibility: the
+generated Unix dispatch table can change without any of those changing. An
+ordinal-zero initialization handshake now verifies a shared ABI magic and the
+exact generated call count before any later Unix call. Never reuse an older
+`wineopenxr.so` with a newly built PE, or deploy either half alone.
+
 For eligible color swapchains, WineOpenXR exposes ordinary DXVK-owned,
 optimal-tiling textures to the application while retaining the runtime's
 transport images. On release it flushes DXVK, locks the DXVK submission queue,

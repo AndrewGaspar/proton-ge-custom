@@ -354,6 +354,15 @@ NTSTATUS init_openxr(void *args) {
   Dl_info info;
   void *unix_handle;
 
+  if (params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC) {
+    ERR("PE/Unix ABI magic mismatch: PE %#llx, Unix %#llx.\n",
+        (unsigned long long)params->pe_abi_magic,
+        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC);
+    return STATUS_REVISION_MISMATCH;
+  }
+  params->unix_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC;
+  params->unix_call_count = unix_count;
+
   status = NtQueryVirtualMemory(GetCurrentProcess(), params->winevulkan,
                                 (MEMORY_INFORMATION_CLASS)1000 /*MemoryWineUnixFuncs*/, &unix_funcs, sizeof(unix_funcs),
                                 NULL);

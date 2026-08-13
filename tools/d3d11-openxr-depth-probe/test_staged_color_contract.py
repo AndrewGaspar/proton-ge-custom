@@ -36,6 +36,20 @@ class StagedColorState:
 
 
 class StagedColorContractTest(unittest.TestCase):
+    def test_private_pe_unix_abi_is_handshaken(self):
+        loader = (PROTON_ROOT / "wineopenxr/openxr_loader.c").read_text()
+        header = (PROTON_ROOT / "wineopenxr/openxr_loader.h").read_text()
+        unix = (PROTON_ROOT / "wineopenxr/openxr.c").read_text()
+
+        self.assertIn("WINEOPENXR_UNIX_ABI_MAGIC", header)
+        self.assertIn("pe_abi_magic", header)
+        self.assertIn("unix_abi_magic", header)
+        self.assertIn("unix_call_count", header)
+        self.assertIn(".pe_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC", loader)
+        self.assertIn("params.unix_call_count != unix_count", loader)
+        self.assertIn("params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC", unix)
+        self.assertIn("params->unix_call_count = unix_count", unix)
+
     def test_release_uses_wait_order_and_restores_boundaries(self):
         state = StagedColorState()
         first = state.acquire()
