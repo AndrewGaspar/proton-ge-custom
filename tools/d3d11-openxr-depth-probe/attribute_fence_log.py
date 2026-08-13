@@ -14,7 +14,9 @@ RECOVERED = re.compile(r"Client fence recovered after (\d+) timeout\(s\): client
 ATTRIBUTION = re.compile(r"Client fence attribution enabled: client=(\d+) ")
 
 
-def classify(text: str, application: str, persistent_count: int) -> int:
+def classify(
+    text: str, application: str, persistent_count: int, runtime_capable: bool = False
+) -> int:
     described_id = None
     applications = []
     for line in text.splitlines():
@@ -64,7 +66,7 @@ def classify(text: str, application: str, persistent_count: int) -> int:
     if target_id is None:
         print(f"WARN: no IPC client description found for {application}; attribution unavailable")
         return 2
-    if target_id not in attributed_clients:
+    if target_id not in attributed_clients and not runtime_capable:
         print(
             f"WARN: client {target_id} ({application}) has no fence-attribution "
             "capability marker; attribution unavailable"
@@ -88,9 +90,12 @@ def main() -> int:
     parser.add_argument("log")
     parser.add_argument("--application", default="d3d11-openxr-depth-probe")
     parser.add_argument("--persistent-count", type=int, default=5)
+    parser.add_argument("--runtime-capable", action="store_true")
     args = parser.parse_args()
     with open(args.log, encoding="utf-8", errors="replace") as stream:
-        return classify(stream.read(), args.application, args.persistent_count)
+        return classify(
+            stream.read(), args.application, args.persistent_count, args.runtime_capable
+        )
 
 
 if __name__ == "__main__":

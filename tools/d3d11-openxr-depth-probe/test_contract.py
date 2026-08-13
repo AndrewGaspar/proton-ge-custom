@@ -104,6 +104,16 @@ class D32S8ImportContractTest(unittest.TestCase):
 """
         self.assertEqual(attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5), 2)
 
+    def test_fence_attribution_accepts_capable_runtime_without_stage_waits(self):
+        log = """
+ id: 13
+ application_name: 'd3d11-openxr-depth-probe'
+"""
+        self.assertEqual(
+            attribute_fence_log.classify(log, "d3d11-openxr-depth-probe", 5, True),
+            0,
+        )
+
     def test_two_dsv_srv_cycles_keep_actual_and_tracked_layouts_equal(self):
         state = LayoutState()
 
@@ -265,6 +275,8 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("--show-cursor", runner)
         self.assertIn("sleep 2", runner)
         self.assertIn("attribute_fence_log.py", runner)
+        self.assertIn("/proc/$server_pid/exe", runner)
+        self.assertIn("--runtime-capable", runner)
         self.assertIn("cleanup: complete", runner)
 
         readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
