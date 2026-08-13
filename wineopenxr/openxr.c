@@ -354,6 +354,12 @@ NTSTATUS init_openxr(void *args) {
   Dl_info info;
   void *unix_handle;
 
+  /* This field is inside the legacy 24-byte structure. Check it before
+   * accessing any appended handshake fields so an old PE fails safely. */
+  if (params->create_instance_callback != WINEOPENXR_UNIX_ABI_REQUEST) {
+    ERR("PE/Unix ABI request marker missing; refusing an unsafe mixed pair.\n");
+    return STATUS_REVISION_MISMATCH;
+  }
   if (params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC) {
     ERR("PE/Unix ABI magic mismatch: PE %#llx, Unix %#llx.\n",
         (unsigned long long)params->pe_abi_magic,

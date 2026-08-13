@@ -49,12 +49,17 @@ class StagedColorContractTest(unittest.TestCase):
         unix = (PROTON_ROOT / "wineopenxr/openxr.c").read_text()
 
         self.assertIn("WINEOPENXR_UNIX_ABI_MAGIC", header)
+        self.assertIn("WINEOPENXR_UNIX_ABI_REQUEST", header)
         self.assertIn("pe_abi_magic", header)
         self.assertIn("unix_abi_magic", header)
         self.assertIn("unix_call_count", header)
         self.assertIn(".pe_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC", loader)
+        self.assertIn(".create_instance_callback = WINEOPENXR_UNIX_ABI_REQUEST", loader)
         self.assertIn("params.unix_call_count != unix_count", loader)
         self.assertIn("params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC", unix)
+        marker_check = "params->create_instance_callback != WINEOPENXR_UNIX_ABI_REQUEST"
+        self.assertIn(marker_check, unix)
+        self.assertLess(unix.index(marker_check), unix.index("params->pe_abi_magic"))
         self.assertIn("params->unix_call_count = unix_count", unix)
 
     def test_release_uses_wait_order_and_restores_boundaries(self):

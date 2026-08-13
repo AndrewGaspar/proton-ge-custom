@@ -217,6 +217,7 @@ done:
 static BOOL WINAPI wine_openxr_unix_init(INIT_ONCE *once, void *param, void **context) {
   struct init_openxr_params params = {
       .winevulkan = LoadLibraryA("winevulkan.dll"),
+      .create_instance_callback = WINEOPENXR_UNIX_ABI_REQUEST,
       .pe_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC,
   };
   if (__wine_init_unix_call() || UNIX_CALL(init, &params)) {
