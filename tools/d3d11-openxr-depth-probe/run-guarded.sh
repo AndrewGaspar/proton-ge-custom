@@ -30,6 +30,36 @@ case "$stage" in
   frame|unity) stage_timeout=90s ;;
 esac
 
+case "$stage" in
+  draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity)
+    command -v jq >/dev/null || {
+      echo "FAIL: jq is required to resolve the live Hyprland instance" >&2
+      exit 127
+    }
+    instances=$(env -u HYPRLAND_INSTANCE_SIGNATURE hyprctl instances -j)
+    instance_count=$(jq 'length' <<<"$instances")
+    if (( instance_count != 1 )); then
+      echo "FAIL: expected exactly one live Hyprland instance, found $instance_count" >&2
+      exit 1
+    fi
+    instance_signature=$(jq -r '.[0].instance' <<<"$instances")
+    xr_status=$(HYPRLAND_INSTANCE_SIGNATURE="$instance_signature" hyprctl openxr status)
+    grep -Fqx 'state: focused' <<<"$xr_status" || {
+      echo "FAIL: live Hyprland instance is not focused" >&2
+      exit 1
+    }
+    grep -Fqx 'visible: yes' <<<"$xr_status" || {
+      echo "FAIL: live Hyprland instance is not visible" >&2
+      exit 1
+    }
+    grep -Fqx 'presence: yes' <<<"$xr_status" || {
+      echo "FAIL: live Hyprland instance does not report user presence" >&2
+      exit 1
+    }
+    echo "PASS: live Hyprland instance $instance_signature is focused, visible, and present"
+    ;;
+esac
+
 before=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
 started=$(date --iso-8601=seconds)
 stdout_log="$probe_dir/d3d11-openxr-depth-probe.stdout.log"

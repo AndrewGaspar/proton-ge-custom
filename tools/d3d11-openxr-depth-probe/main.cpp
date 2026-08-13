@@ -972,6 +972,32 @@ clear_depth_swapchain(const SXrFunctions & xr,
     return xr_ok(xr.releaseImage(depth.handle, &releaseInfo), "xrReleaseSwapchainImage");
 }
 
+static bool cleanup_xr_d3d(const SXrFunctions &xr, XrSession session,
+                           ID3D11DeviceContext *&context,
+                           ID3D11Device *&device, XrInstance instance,
+                           HMODULE &loader) {
+  std::fprintf(stderr, "cleanup: destroying OpenXR session\n");
+  const bool sessionOk =
+      xr_ok(xr.destroySession(session), "xrDestroySession(cleanup)");
+
+  std::fprintf(stderr, "cleanup: releasing D3D11 context and device\n");
+  release(context);
+  release(device);
+
+  std::fprintf(stderr, "cleanup: destroying OpenXR instance\n");
+  const bool instanceOk =
+      xr_ok(xr.destroyInstance(instance), "xrDestroyInstance(cleanup)");
+
+  std::fprintf(stderr, "cleanup: unloading OpenXR loader\n");
+  const bool loaderOk = FreeLibrary(loader) != FALSE;
+  loader = nullptr;
+  if (!loaderOk)
+    std::fprintf(stderr, "FAIL: FreeLibrary(openxr_loader.dll) returned %lu\n",
+                 GetLastError());
+  std::fprintf(stderr, "cleanup: complete\n");
+  return sessionOk && instanceOk && loaderOk;
+}
+
 int main(int argc, char ** argv)
 {
     if (!std::freopen("d3d11-openxr-depth-probe.stdout.log", "w", stdout) ||
@@ -1311,7 +1337,9 @@ int main(int argc, char ** argv)
           !destroy_color_swapchain(xr, colors[eye]))
         return 1;
     }
-    if (!succeeded)
+    const bool cleanupSucceeded =
+        cleanup_xr_d3d(xr, session, context, device, instance, loader);
+    if (!succeeded || !cleanupSucceeded)
       return 1;
     if (unityStage)
       std::printf("PASS: Unity-style color/depth rebuild and projection+depth "
