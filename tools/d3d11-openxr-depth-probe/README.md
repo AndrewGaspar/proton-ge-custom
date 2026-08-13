@@ -65,6 +65,13 @@ returns 99 after any new NVIDIA Xid. Each stage also has a bounded timeout that
 terminates only the probe's UMU process group; the post-run Xid check still runs
 after a timeout. It never broadly kills Wine or a wineserver.
 
+Before every draw or frame stage, the runner removes any inherited
+`HYPRLAND_INSTANCE_SIGNATURE`, resolves `hyprctl instances`, requires exactly
+one live compositor, and queries that explicit signature. It refuses to render
+unless the live OpenXR session is focused, visible, and reports user presence.
+The probe logs each OpenXR/D3D cleanup phase before printing its PASS marker, so
+a successful GPU fence cannot be mistaken for a fully completed process.
+
 ```sh
 OPENXR_LOADER_DLL=/path/to/OpenXR-1.1/openxr_loader.dll \
   bash tools/d3d11-openxr-depth-probe/build.sh
