@@ -148,6 +148,8 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("std::chrono::seconds(3)", probe)
         self.assertIn("bool colorAcquired = false;", probe)
         self.assertIn("bool depthAcquired = false;", probe)
+        self.assertIn("cleanup: destroying OpenXR session", probe)
+        self.assertIn("cleanup_xr_d3d(xr, session, context, device, instance, loader)", probe)
         frame_loop = probe.split("for (uint32_t attempt = 0;", 1)[1].split(
             'std::printf("completed %u rendered projection frames', 1
         )[0]
@@ -190,6 +192,9 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertNotIn("MetaHorizon/pfx", runner)
         self.assertIn("bootstrap) expected='PASS: Proton and Wine VR bootstrap completed'", runner)
         self.assertIn("timeout --kill-after=5s", runner)
+        self.assertIn("env -u HYPRLAND_INSTANCE_SIGNATURE hyprctl instances -j", runner)
+        self.assertIn("HYPRLAND_INSTANCE_SIGNATURE=\"$instance_signature\" hyprctl openxr status", runner)
+        self.assertIn("expected exactly one live Hyprland instance", runner)
         self.assertNotIn("timeout --foreground", runner)
         self.assertIn("frame|unity) stage_timeout=90s", runner)
         self.assertLess(runner.index('status=$?'), runner.index('after=$(journalctl'))
