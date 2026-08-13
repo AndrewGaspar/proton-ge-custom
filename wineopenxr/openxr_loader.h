@@ -41,6 +41,7 @@ struct vk_create_callback_context {
 };
 
 #define WINEOPENXR_UNIX_ABI_MAGIC UINT64_C(0x575852554e495831)
+#define WINEOPENXR_UNIX_ABI_REQUEST UINT64_C(0x5758525245513031)
 
 struct init_openxr_params {
   HMODULE winevulkan;
