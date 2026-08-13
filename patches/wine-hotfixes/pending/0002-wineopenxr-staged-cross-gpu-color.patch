@@ -1,6 +1,7 @@
 # Generated against Wine 1729f00e17e879f98f9df1f2bca86bc5d21a65df
 # after 0001-decouple-wineopenxr-from-steamvr-and-integrate-it-in.patch.
-# Contract: staged-color command pools are swapchain-owned, and PE/Unix are a matched private-ABI pair.
+# Contract: staged-color command pools are swapchain-owned, not session-owned.
+# The WineOpenXR PE and Unix library are one matched private-ABI pair.
 diff --git i/dlls/wineopenxr/dxvk-interop.h w/dlls/wineopenxr/dxvk-interop.h
 index 946aa1e1203..ddadb36a20b 100644
 --- i/dlls/wineopenxr/dxvk-interop.h
