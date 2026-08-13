@@ -194,6 +194,13 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("timeout --kill-after=5s", runner)
         self.assertIn("env -u HYPRLAND_INSTANCE_SIGNATURE hyprctl instances -j", runner)
         self.assertIn("HYPRLAND_INSTANCE_SIGNATURE=\"$instance_signature\" hyprctl openxr status", runner)
+        self.assertIn("umu_env=(env -u HYPRLAND_INSTANCE_SIGNATURE)", runner)
+        self.assertIn('umu_env+=(HYPRLAND_INSTANCE_SIGNATURE="$instance_signature")', runner)
+        self.assertIn('"${umu_env[@]}" WINEPREFIX="$compat_data_dir"', runner)
+        self.assertLess(
+            runner.index('umu_env+=(HYPRLAND_INSTANCE_SIGNATURE="$instance_signature")'),
+            runner.index('"${umu_env[@]}" WINEPREFIX="$compat_data_dir"'),
+        )
         self.assertIn("expected exactly one live Hyprland instance", runner)
         self.assertNotIn("timeout --foreground", runner)
         self.assertIn("frame|unity) stage_timeout=90s", runner)
