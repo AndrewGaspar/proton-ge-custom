@@ -7,8 +7,8 @@ swapchain with `DEPTH_STENCIL_ATTACHMENT | SAMPLED` usage.
 
 Stages are intentionally ordered from lowest risk to highest:
 
-1. `bootstrap`: prove that UMU, Proton, and Wine's volatile VR registry are
-   ready, then exit before the probe loads OpenXR or creates a D3D11 device.
+1. `bootstrap`: prove that UMU, Proton, and Wine's volatile OpenXR registry are
+   ready, then exit before the probe creates an OpenXR session or D3D11 device.
 2. `enumerate`: create and enumerate the swapchain images, then print the
    D3D11 resource descriptor.
 3. `views`: additionally create the OVR-style typed DSV and depth-plane SRV.
@@ -111,13 +111,15 @@ bash tools/d3d11-openxr-depth-probe/run-guarded.sh bootstrap
 ```
 
 The WiVRn runtime must already be running for every later stage. The probe
-loads `vrclient_x64.dll`, invokes Proton's `vrclient_init_registry` entry point,
-and keeps the module loaded while waiting for `HKCU\\Software\\Wine\\VR` state
-1. This is the same preflight used by Heroic, but keeping it in the probe
-process preserves the volatile registry state without Heroic's long-lived
-companion. The runner launches the probe directly rather than through Wine's
-Steam stub, which does not forward this Unix-path executable. It uses a
-nonempty numeric game ID and Proton's `run` verb: the default
+loads `wineopenxr.dll`, invokes its private `wineopenxr_init_registry` entry
+point, keeps the module loaded, and validates the resulting
+`HKCU\\Software\\Wine\\XR` state, extension strings, and device identifiers.
+This performs OpenXR instance/system discovery without creating an OpenXR
+session. The runner also sets `PROTON_USE_XALIA=0`: a fresh Wine explorer would
+otherwise launch Xalia, whose OpenVR provider creates a competing XRizer
+session during the preflight. The runner launches the probe directly rather
+than through Wine's Steam stub, which does not forward this Unix-path
+executable. It uses a nonempty numeric game ID and Proton's `run` verb: the default
 `waitforexitandrun` blocks before the probe starts whenever another process is
 alive in the Meta prefix. The runner
 passes the Meta Proton compatibility-data directory to UMU, not its inner
@@ -136,11 +138,10 @@ unavailable rather than incorrectly blamed on the probe. Kernel Xids, a
 missing PASS marker, nonzero process status, or incomplete cleanup still fail
 independently.
 
-The `bootstrap` stage runs the in-process VR preflight but exits before the
-probe's OpenXR or D3D11 initialization. Proton's VR preflight can still
-initialize its own runtime helpers and enumerate graphics devices. The build
-links the MinGW runtime statically so the target reaches `main()` without
-relying on undeployed `libstdc++`, `libgcc`, or `libwinpthread` DLLs.
+The `bootstrap` stage runs the in-process OpenXR cache preflight but exits
+before the probe creates a session or D3D11 device. The build links the MinGW
+runtime statically so the target reaches `main()` without relying on undeployed
+`libstdc++`, `libgcc`, or `libwinpthread` DLLs.
 
 The hermetic contract regression does not access a GPU. It checks the resource
 and view format family, the actual-image versus DXVK usage superset, and two

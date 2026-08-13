@@ -62,27 +62,27 @@ hr_ok(HRESULT result, const char * call)
 }
 
 static bool
-initialize_vr_registry()
+initialize_xr_registry()
 {
-    using VrclientInitRegistry = BOOL (__cdecl *)(void);
-    static HMODULE vrclient = LoadLibraryA("vrclient_x64.dll");
-    if (!vrclient)
+    using WineOpenXrInitRegistry = BOOL (__cdecl *)(void);
+    static HMODULE wineOpenXr = LoadLibraryA("wineopenxr.dll");
+    if (!wineOpenXr)
     {
-        std::fprintf(stderr, "FAIL: LoadLibrary(vrclient_x64.dll) returned %lu\n", GetLastError());
+        std::fprintf(stderr, "FAIL: LoadLibrary(wineopenxr.dll) returned %lu\n", GetLastError());
         return false;
     }
 
-    const auto procedure = GetProcAddress(vrclient, "vrclient_init_registry");
-    VrclientInitRegistry initialize = nullptr;
+    const auto procedure = GetProcAddress(wineOpenXr, "wineopenxr_init_registry");
+    WineOpenXrInitRegistry initialize = nullptr;
     std::memcpy(&initialize, &procedure, sizeof(initialize));
     if (!initialize)
     {
-        std::fprintf(stderr, "FAIL: vrclient_x64.dll has no vrclient_init_registry entry point\n");
+        std::fprintf(stderr, "FAIL: wineopenxr.dll has no wineopenxr_init_registry entry point\n");
         return false;
     }
     if (!initialize())
     {
-        std::fprintf(stderr, "FAIL: vrclient_init_registry returned false\n");
+        std::fprintf(stderr, "FAIL: wineopenxr_init_registry returned false\n");
         return false;
     }
 
@@ -92,29 +92,65 @@ initialize_vr_registry()
     do
     {
         HKEY key = nullptr;
-        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\VR", 0, KEY_READ, &key) == ERROR_SUCCESS)
+        if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\XR", 0, KEY_READ, &key) == ERROR_SUCCESS)
         {
             DWORD type = 0;
             DWORD state = 0;
             DWORD size = sizeof(state);
             const LSTATUS status = RegQueryValueExA(key, "state", nullptr, &type,
                                                     reinterpret_cast<BYTE *>(&state), &size);
-            RegCloseKey(key);
             if (status == ERROR_SUCCESS && type == REG_DWORD && state == 1)
             {
-                std::printf("Wine VR registry state: ready\n");
+                const char * stringValues[] = {
+                    "openxr_vulkan_instance_extensions",
+                    "openxr_vulkan_device_extensions",
+                };
+                for (const char * name : stringValues)
+                {
+                    DWORD valueType = 0;
+                    DWORD valueSize = 0;
+                    if (RegQueryValueExA(key, name, nullptr, &valueType, nullptr, &valueSize) != ERROR_SUCCESS ||
+                        valueType != REG_SZ || valueSize <= 1)
+                    {
+                        std::fprintf(stderr, "FAIL: Wine OpenXR registry has no valid %s value\n", name);
+                        RegCloseKey(key);
+                        return false;
+                    }
+                }
+                const char * dwordValues[] = {
+                    "openxr_vulkan_device_vid",
+                    "openxr_vulkan_device_pid",
+                };
+                for (const char * name : dwordValues)
+                {
+                    DWORD valueType = 0;
+                    DWORD value = 0;
+                    DWORD valueSize = sizeof(value);
+                    if (RegQueryValueExA(key, name, nullptr, &valueType,
+                                         reinterpret_cast<BYTE *>(&value), &valueSize) != ERROR_SUCCESS ||
+                        valueType != REG_DWORD || valueSize != sizeof(value))
+                    {
+                        std::fprintf(stderr, "FAIL: Wine OpenXR registry has no valid %s value\n", name);
+                        RegCloseKey(key);
+                        return false;
+                    }
+                }
+                RegCloseKey(key);
+                std::printf("Wine OpenXR registry state: ready\n");
                 return true;
             }
             if (status == ERROR_SUCCESS && type == REG_DWORD && state == static_cast<DWORD>(-1))
             {
-                std::fprintf(stderr, "FAIL: Wine VR registry initialization reported state -1\n");
+                std::fprintf(stderr, "FAIL: Wine OpenXR registry initialization reported state -1\n");
+                RegCloseKey(key);
                 return false;
             }
+            RegCloseKey(key);
         }
         Sleep(50);
     } while (GetTickCount64() < deadline);
 
-    std::fprintf(stderr, "FAIL: Wine VR registry did not reach state 1 within 15 seconds\n");
+    std::fprintf(stderr, "FAIL: Wine OpenXR registry did not reach state 1 within 15 seconds\n");
     return false;
 }
 
@@ -1057,14 +1093,14 @@ int main(int argc, char ** argv)
         return 2;
     }
 
-    log_phase("Wine VR registry bootstrap begin");
-    if (!initialize_vr_registry())
+    log_phase("Wine OpenXR registry bootstrap begin");
+    if (!initialize_xr_registry())
         return 1;
-    log_phase("Wine VR registry bootstrap complete");
+    log_phase("Wine OpenXR registry bootstrap complete");
 
     if (std::strcmp(stage, "bootstrap") == 0)
     {
-        std::printf("PASS: Proton and Wine VR bootstrap completed\n");
+        std::printf("PASS: Proton and Wine OpenXR bootstrap completed without creating an XR session\n");
         return 0;
     }
 
