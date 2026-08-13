@@ -119,9 +119,12 @@ session. The runner also sets `PROTON_USE_XALIA=0`: a fresh Wine explorer would
 otherwise launch Xalia, whose OpenVR provider creates a competing XRizer
 session during the preflight. The runner launches the probe directly rather
 than through Wine's Steam stub, which does not forward this Unix-path
-executable. It uses a nonempty numeric game ID and Proton's `run` verb: the default
-`waitforexitandrun` blocks before the probe starts whenever another process is
-alive in the Meta prefix. The runner
+executable. It uses Proton's `runinprefix` verb, which launches the target
+directly through Wine without Proton's `umu.exe` game wrapper. The wrapper's
+asynchronous `vrclient_init_registry` path would otherwise duplicate the
+probe's synchronous OpenXR-only bootstrap. `runinprefix` also avoids the
+default `waitforexitandrun` behavior, which blocks before the probe starts
+whenever another process is alive in the Meta prefix. The runner
 passes the Meta Proton compatibility-data directory to UMU, not its inner
 `pfx` directory; UMU maps that root to `STEAM_COMPAT_DATA_PATH` and Proton then
 selects the existing `pfx` child. The runner does not start, restart, or deploy
