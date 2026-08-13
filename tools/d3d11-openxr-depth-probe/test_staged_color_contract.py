@@ -36,6 +36,13 @@ class StagedColorState:
 
 
 class StagedColorContractTest(unittest.TestCase):
+    def test_pair_verifier_checks_generated_table_and_both_handshake_halves(self):
+        verifier = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/verify_wineopenxr_pair.py").read_text()
+        self.assertIn("__wine_unix_call_funcs", verifier)
+        self.assertIn("expected_bytes = len(entries) * 8", verifier)
+        self.assertIn("PE/Unix ABI handshake failed", verifier)
+        self.assertIn("PE/Unix ABI magic mismatch", verifier)
+
     def test_private_pe_unix_abi_is_handshaken(self):
         loader = (PROTON_ROOT / "wineopenxr/openxr_loader.c").read_text()
         header = (PROTON_ROOT / "wineopenxr/openxr_loader.h").read_text()
