@@ -24,6 +24,10 @@ case "$stage" in
 esac
 
 umu_env=(env -u HYPRLAND_INSTANCE_SIGNATURE)
+if [[ -n ${WINEOPENXR_STAGED_CROSS_GPU_COLOR:-} ]]; then
+  umu_env+=(WINEOPENXR_STAGED_CROSS_GPU_COLOR="$WINEOPENXR_STAGED_CROSS_GPU_COLOR")
+  echo "INFO: propagating WINEOPENXR_STAGED_CROSS_GPU_COLOR=$WINEOPENXR_STAGED_CROSS_GPU_COLOR to Proton"
+fi
 case "$stage" in
   bootstrap) stage_timeout=30s ;;
   enumerate|views|clear|sample) stage_timeout=45s ;;
@@ -87,6 +91,7 @@ set +e
         PROTONPATH="$proton_dir" \
         GAMEID=999999999 \
         UMU_USE_STEAM=0 \
+        PROTON_USE_XALIA=0 \
         PROTON_VERB=run \
         DXVK_LOG_LEVEL=debug \
         "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
@@ -111,7 +116,7 @@ cat "$stdout_log"
 cat "$stderr_log" >&2
 
 case "$stage" in
-  bootstrap) expected='PASS: Proton and Wine VR bootstrap completed' ;;
+  bootstrap) expected='PASS: Proton and Wine OpenXR bootstrap completed without creating an XR session' ;;
   enumerate) expected='PASS: create and enumerate only' ;;
   views) expected='PASS: create, enumerate, and OVR-style views' ;;
   clear) expected='PASS: two clear cycles and GPU event fences completed' ;;
