@@ -72,7 +72,8 @@ wivrn_log="$probe_dir/d3d11-openxr-depth-probe.wivrn.log"
 runtime_capable=()
 server_pid=$(pgrep -o -x wivrn-server || true)
 if [[ -n "$server_pid" ]] &&
-  strings "/proc/$server_pid/exe" | grep -Fq 'Waiting on client fence timed out > 100ms! client=%u'; then
+  strings "/proc/$server_pid/exe" |
+    grep -F 'Waiting on client fence timed out > 100ms! client=%u' >/dev/null; then
   runtime_capable=(--runtime-capable)
 fi
 : > "$stdout_log"
