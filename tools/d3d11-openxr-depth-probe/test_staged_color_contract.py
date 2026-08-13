@@ -62,6 +62,10 @@ class StagedColorContractTest(unittest.TestCase):
     def test_source_keeps_experimental_path_narrow_and_ordered(self):
         loader = (PROTON_ROOT / "wineopenxr/openxr_loader.c").read_text()
         header = (PROTON_ROOT / "wineopenxr/openxr_loader.h").read_text()
+        carrier = (
+            PROTON_ROOT
+            / "patches/wine-hotfixes/pending/0002-wineopenxr-staged-cross-gpu-color.patch"
+        ).read_text()
 
         self.assertIn('STAGED_COLOR_ENV "WINEOPENXR_STAGED_CROSS_GPU_COLOR"', loader)
         self.assertIn("if (!session->staged_color_enabled)", loader)
@@ -88,6 +92,28 @@ class StagedColorContractTest(unittest.TestCase):
         )[0]
         self.assertNotIn("VkCommandPool staged_color_command_pool", session_fields)
         self.assertIn("VkCommandPool staged_color_command_pool", swapchain_fields)
+
+        self.assertIn(
+            "Contract: staged-color command pools are swapchain-owned, not session-owned.",
+            carrier,
+        )
+        carrier_header = carrier.split(
+            "diff --git i/dlls/wineopenxr/openxr_loader.h", 1
+        )[1]
+        carrier_session = carrier_header.split(
+            "   XrSession host_session;", 1
+        )[1].split("+typedef struct {\n+  VkImage host_image;", 1)[0]
+        carrier_swapchain = carrier_header.split(
+            "   XrSwapchain host_swapchain;", 1
+        )[1]
+        self.assertNotIn("VkCommandPool staged_color_command_pool", carrier_session)
+        self.assertIn("VkCommandPool staged_color_command_pool", carrier_swapchain)
+        self.assertIn(
+            "+      .commandPool = swapchain->staged_color_command_pool,", carrier
+        )
+        self.assertNotIn(
+            "+      .commandPool = session->staged_color_command_pool,", carrier
+        )
 
         release = loader.split("XrResult WINAPI xrReleaseSwapchainImage", 1)[1].split(
             "XrResult WINAPI xrBeginFrame", 1
