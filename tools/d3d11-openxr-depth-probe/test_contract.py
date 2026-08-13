@@ -277,6 +277,7 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("attribute_fence_log.py", runner)
         self.assertIn("/proc/$server_pid/exe", runner)
         self.assertIn("--runtime-capable", runner)
+        self.assertNotIn("grep -Fq 'Waiting on client fence", runner)
         self.assertIn("cleanup: complete", runner)
 
         readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
