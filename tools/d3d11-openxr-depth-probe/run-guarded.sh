@@ -92,7 +92,7 @@ set +e
         GAMEID=999999999 \
         UMU_USE_STEAM=0 \
         PROTON_USE_XALIA=0 \
-        PROTON_VERB=run \
+        PROTON_VERB=runinprefix \
         DXVK_LOG_LEVEL=debug \
         "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
 )
