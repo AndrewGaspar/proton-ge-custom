@@ -521,6 +521,15 @@ static VkResult WINAPI vk_create_device_callback32(VkPhysicalDevice phys_dev,
 NTSTATUS init_openxr(void *args) {
   struct init_openxr_params *params = args;
 
+  if (params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC) {
+    ERR("PE/Unix ABI magic mismatch: PE %#llx, Unix %#llx.\n",
+        (unsigned long long)params->pe_abi_magic,
+        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC);
+    return STATUS_REVISION_MISMATCH;
+  }
+  params->unix_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC;
+  params->unix_call_count = unix_count;
+
 #ifdef _WIN64
   params->create_instance_callback = (UINT64)(ULONG_PTR)&vk_create_instance_callback;
   params->create_device_callback = (UINT64)(ULONG_PTR)&vk_create_device_callback;
@@ -538,8 +547,20 @@ NTSTATUS wow64_init_openxr(void *args)
     UINT32 winevulkan;
     UINT64 create_instance_callback;
     UINT64 create_device_callback;
+    UINT64 pe_abi_magic;
+    UINT64 unix_abi_magic;
+    UINT64 unix_call_count;
   }
   *params = args;
+
+  if (params->pe_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC) {
+    ERR("PE/Unix ABI magic mismatch: PE %#llx, Unix %#llx.\n",
+        (unsigned long long)params->pe_abi_magic,
+        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC);
+    return STATUS_REVISION_MISMATCH;
+  }
+  params->unix_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC;
+  params->unix_call_count = unix_count;
 
   params->create_instance_callback = (UINT64)(ULONG_PTR)&vk_create_instance_callback32;
   params->create_device_callback = (UINT64)(ULONG_PTR)&vk_create_device_callback32;

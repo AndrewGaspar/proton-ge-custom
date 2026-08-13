@@ -193,8 +193,18 @@ done:
 }
 
 static BOOL WINAPI wine_openxr_unix_init(INIT_ONCE *once, void *param, void **context) {
-  struct init_openxr_params params = {.winevulkan = LoadLibraryA("winevulkan.dll")};
+  struct init_openxr_params params = {
+      .winevulkan = LoadLibraryA("winevulkan.dll"),
+      .pe_abi_magic = WINEOPENXR_UNIX_ABI_MAGIC,
+  };
   if (__wine_init_unix_call() || UNIX_CALL(init, &params)) {
+    return FALSE;
+  }
+  if (params.unix_abi_magic != WINEOPENXR_UNIX_ABI_MAGIC || params.unix_call_count != unix_count) {
+    ERR("PE/Unix ABI handshake failed: Unix magic %#llx, calls %llu; PE magic %#llx, calls %u.\n",
+        (unsigned long long)params.unix_abi_magic,
+        (unsigned long long)params.unix_call_count,
+        (unsigned long long)WINEOPENXR_UNIX_ABI_MAGIC, unix_count);
     return FALSE;
   }
   g_vk_create_instance_callback = params.create_instance_callback;
