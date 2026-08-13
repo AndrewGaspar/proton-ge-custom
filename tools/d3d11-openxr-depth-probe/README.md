@@ -60,3 +60,70 @@ MONADO_SRC=/path/to/monado \
   python3 tools/d3d11-openxr-depth-probe/test_contract.py
 # Or: python3 tools/d3d11-openxr-depth-probe/test_contract.py --monado-src /path/to/monado
 ```
+
+## Experimental staged cross-GPU color
+
+`WINEOPENXR_STAGED_CROSS_GPU_COLOR=1` enables an experimental D3D11-only
+swapchain path. It is disabled by default and is intended to test—not assume—the
+hypothesis that rendering to an imported linear color image alongside a
+client-local optimal depth image triggers the NVIDIA fault.
+
+For eligible color swapchains, WineOpenXR exposes ordinary DXVK-owned,
+optimal-tiling textures to the application while retaining the runtime's
+transport images. On release it flushes DXVK, locks the DXVK submission queue,
+copies every mip and array layer into the index-matched transport image, restores
+both boundary layouts, and then releases the transport image to the runtime.
+The application descriptor remains unchanged; only the host swapchain gains
+`XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT`.
+
+The staged path currently rejects depth, multisampled, cube/face, and protected
+swapchains. Proxy and transport formats must match exactly, and DXVK must create
+an optimal-tiling proxy with transfer-source usage. Any failed capability check
+returns a diagnostic rather than silently selecting a different format. Static
+swapchains are copied on their single release and remain valid afterward.
+
+When Vulkan timestamps are supported on the DXVK submission queue, WineOpenXR
+logs the first copy and every 300th copy with last/average/maximum GPU duration.
+This instrumentation is the source of measured copy cost; no performance number
+should be claimed until the path has run on the target RTX 5070 topology.
+
+The CPU-only state and source contract is:
+
+```sh
+python3 tools/d3d11-openxr-depth-probe/test_staged_color_contract.py
+```
+
+It covers FIFO index coupling, repeated and static-image lifecycles, layout
+restoration, all-mip/all-layer recording, eligibility gates, and the required
+flush/lock/copy/host-release ordering. It does not establish that mixed tiling
+is the root cause; the attended discriminator ladder must do that before this
+workaround is enabled for Walkabout.
+
+The standalone native Vulkan probe checks the copy primitive independently of
+OpenXR, Wine, and DXVK. It creates an optimal-tiling source and a mapped
+linear-tiling destination, copies the exact format, and verifies every pixel in
+three mips and three array layers. Both `R8G8B8A8_UNORM` and
+`R8G8B8A8_SRGB` run through a repeated lifecycle and a one-copy static-style
+lifecycle. Exit 77 means the selected device cannot provide a required image or
+host-visible memory capability; linear sampled and color-attachment features
+are printed for context but are not required by the transport destination.
+
+Build it with the system Vulkan loader and headers:
+
+```sh
+g++ -std=c++17 -O2 -Wall -Wextra -Werror \
+  tools/d3d11-openxr-depth-probe/staged-color-vulkan.cpp \
+  -lvulkan -o /tmp/staged-color-vulkan
+```
+
+The optional argument is the physical-device index printed by the probe. For
+example, after selecting the desired Vulkan ICD(s):
+
+```sh
+/tmp/staged-color-vulkan 0
+```
+
+This is a real GPU test. Do not run it during an attended XR session or while a
+faulted NVIDIA channel is still active. A passing copy/readback establishes the
+local optimal-to-linear primitive only; it does not validate WineOpenXR queue
+ordering, cross-GPU import, or the mixed color/depth failure hypothesis.
