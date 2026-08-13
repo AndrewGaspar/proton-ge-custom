@@ -115,9 +115,10 @@ while (( SECONDS < deadline )); do
       unity_connected_at=$SECONDS
     fi
   fi
-  if (( unity_connected )) && grep -q 'Waiting on client fence timed out' <<<"$recent"; then
+  if (( unity_connected )) &&
+    grep -Eq "Fence waiting failed! .*app='Unity'|Waiting on client fence timed out > 100ms! .*app='Unity'.*timeout_count=([5-9]|[1-9][0-9]+)" <<<"$recent"; then
     classification=client-fence-timeout
-    echo "FAIL: Unity connected and WiVRn timed out on its client fence" >&2
+    echo "FAIL: Unity reported a terminal or persistent client-fence wait" >&2
     exit 98
   fi
   if (( unity_connected )) && (( SECONDS - unity_connected_at >= 20 )); then
