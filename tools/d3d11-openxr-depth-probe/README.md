@@ -313,6 +313,9 @@ whether both Unity and the Oculus eye layer actually select `Texture Array` or
 fall back to `Separate`, and retains shared depth plus the staged cross-GPU
 color path in either case. This distinguishes “the byte patch forced Multi
 Pass” from “the unmodified plugin/runtime selected Multi Pass itself.”
+`HEROIC_ROOT` may point at a controlled shadow build for this A/B; the four
+`WALKABOUT_EXPECTED_HEROIC_{MAIN,BUILD,ELECTRON,PACKAGE}_SHA256` variables must
+then pin its exact artifacts rather than weakening the existing checks.
 
 The kernel Xid count and exact Unity-client disconnect are checked throughout.
 On every outcome the harness first stops its recorded Heroic launcher, then stops
