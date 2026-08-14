@@ -341,6 +341,7 @@ deadline=$((SECONDS + run_timeout))
 unity_connected_at=0
 unity_client_id=
 workload_ready_at=0
+stereo_mode=
 while (( SECONDS < deadline )); do
   after_xids=$(journalctl -k --no-pager | grep -c 'NVRM: Xid' || true)
   if (( after_xids > before_xids )); then
@@ -395,13 +396,21 @@ while (( SECONDS < deadline )); do
       cmp -s "$player_log" "$artifact_dir/Player.before.log"; then
       player_fresh=0
     fi
-    if (( player_fresh )) &&
+    if (( player_fresh )) && [[ -z "$stereo_mode" ]]; then
+      if grep -Fq 'Unity will render to eye texture(s) of format: Texture Array' "$player_log" &&
+        grep -Fq 'The Oculus eye layer has texture(s) of format: Texture Array' "$player_log"; then
+        stereo_mode=texture-array
+      elif grep -Fq 'Unity will render to eye texture(s) of format: Separate' "$player_log" &&
+        grep -Fq 'The Oculus eye layer has texture(s) of format: Separate' "$player_log"; then
+        stereo_mode=separate
+      fi
+    fi
+    if (( player_fresh )) && [[ -n "$stereo_mode" ]] &&
       grep -Fq 'Shared Depth Buffer: Yes' "$player_log" &&
       grep -Fq 'Requested Stereo Rendering Mode Single Pass Instanced' "$player_log" &&
-      grep -Fq 'Unity will render to eye texture(s) of format: Texture Array' "$player_log" &&
-      grep -Fq 'The Oculus eye layer has texture(s) of format: Texture Array' "$player_log" &&
       grep -Eq 'XRTextureManager::SetupRenderTextureFromXRRequest .* d: 0*[1-9A-Fa-f][0-9A-Fa-f]*' "$player_log"; then
       if (( workload_ready_at == 0 )); then
+        printf '%s\n' "$stereo_mode" >"$artifact_dir/stereo-mode.txt"
         cp -- "/proc/$walkabout_pid/maps" "$artifact_dir/walkabout.maps"
         if grep -Fq "$prefix_wineopenxr_pe" "$artifact_dir/walkabout.maps"; then
           mapped_wineopenxr_pe=$prefix_wineopenxr_pe
@@ -437,7 +446,7 @@ while (( SECONDS < deadline )); do
     grep -Fq 'NVIDIA' "$dxgi_log" || finish 1 wrong-dxgi-adapter
     grep -Fq 'D3D11' "$d3d11_log" || finish 1 native-d3d11-log-invalid
     grep -Fq 'NVIDIA' "$d3d11_log" || finish 1 wrong-d3d11-adapter
-    finish 0 unity-survived-with-staged-color-single-pass
+    finish 0 "unity-survived-with-staged-color-$stereo_mode"
   fi
   sleep 0.25
 done
