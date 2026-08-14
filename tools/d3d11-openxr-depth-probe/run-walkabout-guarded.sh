@@ -400,15 +400,22 @@ while (( SECONDS < deadline )); do
       grep -Eq 'XRTextureManager::SetupRenderTextureFromXRRequest .* d: 0*[1-9A-Fa-f][0-9A-Fa-f]*' "$player_log"; then
       if (( workload_ready_at == 0 )); then
         cp -- "/proc/$walkabout_pid/maps" "$artifact_dir/walkabout.maps"
+        if grep -Fq "$prefix_wineopenxr_pe" "$artifact_dir/walkabout.maps"; then
+          mapped_wineopenxr_pe=$prefix_wineopenxr_pe
+        elif grep -Fq "$wineopenxr_pe" "$artifact_dir/walkabout.maps"; then
+          mapped_wineopenxr_pe=$wineopenxr_pe
+        else
+          finish 1 required-map-missing-wineopenxr.dll
+        fi
         for mapped_path in \
-          "$prefix_wineopenxr_pe" "$wineopenxr_so" \
+          "$wineopenxr_so" \
           "$prefix_system32/d3d11.dll" "$prefix_system32/dxgi.dll"; do
           grep -Fq "$mapped_path" "$artifact_dir/walkabout.maps" ||
             finish 1 "required-map-missing-$(basename "$mapped_path")"
         done
         awk '$NF ~ /(wineopenxr|d3d11|dxgi)\.(dll|so)$/ {print $NF}' \
           "$artifact_dir/walkabout.maps" | sort -u >"$artifact_dir/walkabout.mapped-paths"
-        sha256sum "$prefix_wineopenxr_pe" "$wineopenxr_so" \
+        sha256sum "$mapped_wineopenxr_pe" "$wineopenxr_so" \
           "$prefix_system32/d3d11.dll" "$prefix_system32/dxgi.dll" \
           >"$artifact_dir/walkabout.mapped-artifacts.sha256"
         workload_ready_at=$SECONDS

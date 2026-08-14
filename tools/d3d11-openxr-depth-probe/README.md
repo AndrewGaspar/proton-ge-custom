@@ -301,7 +301,9 @@ OpenXR/DXVK environment keys, and waits for a fresh `Player.log` that reports
 starting the 20-second health window. At that point it snapshots the process
 maps and requires the hash-verified WineOpenXR PE/Unix pair and native
 D3D11/DXGI files to be mapped. The exact DXVK D3D11 and DXGI logs must identify
-the NVIDIA adapter.
+the NVIDIA adapter. Proton may map its own WineOpenXR PE path or the
+byte-identical prefix copy; both paths are pinned before launch, and the exact
+one observed in the process map is recorded and hashed.
 
 The kernel Xid count and exact Unity-client disconnect are checked throughout.
 On every outcome the harness first stops its recorded Heroic launcher, then stops
