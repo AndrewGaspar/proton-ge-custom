@@ -430,7 +430,7 @@ while (( SECONDS < deadline )); do
     d3d11_log="$dxvk_log_dir/WalkaboutMiniGolf_d3d11.log"
     [[ -s "$dxgi_log" ]] || finish 1 dxgi-log-missing
     [[ -s "$d3d11_log" ]] || finish 1 d3d11-log-missing
-    grep -Fq 'DXVK: v2.7.1' "$dxgi_log" || finish 1 native-dxvk-version-invalid
+    grep -Fq 'DXVK: 2.7.1' "$dxgi_log" || finish 1 native-dxvk-version-invalid
     grep -Fq 'NVIDIA' "$dxgi_log" || finish 1 wrong-dxgi-adapter
     grep -Fq 'D3D11' "$d3d11_log" || finish 1 native-d3d11-log-invalid
     grep -Fq 'NVIDIA' "$d3d11_log" || finish 1 wrong-d3d11-adapter
