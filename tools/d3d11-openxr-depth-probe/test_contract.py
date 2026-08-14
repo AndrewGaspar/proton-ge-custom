@@ -156,6 +156,38 @@ class D32S8ImportContractTest(unittest.TestCase):
             0,
         )
 
+    def test_fence_attribution_selects_exact_application_pid(self):
+        log = """
+ id: 20
+ application_name: 'Unity'
+ pid: 100
+ Client fence attribution enabled: client=20 pid=100 app='Unity'
+ Waiting on client fence timed out > 100ms! client=20 pid=100 app='Unity' frame=7 timeout_count=8
+ id: 21
+ application_name: 'Unity'
+ pid: 200
+ Client fence attribution enabled: client=21 pid=200 app='Unity'
+"""
+        self.assertEqual(
+            attribute_fence_log.classify(log, "Unity", 5, False, 200),
+            0,
+        )
+        self.assertEqual(
+            attribute_fence_log.classify(log, "Unity", 5, False, 100),
+            1,
+        )
+
+    def test_client_id_resolver_parses_timestamped_journal_pid(self):
+        log = """
+Aug 13 21:46:59.837998 framework wivrn-server[790066]:         id: 20
+Aug 13 21:46:59.837998 framework wivrn-server[790066]:         application_name: 'Unity'
+Aug 13 21:46:59.837998 framework wivrn-server[790066]:         pid: 1913667
+"""
+        self.assertEqual(
+            attribute_fence_log.find_target_client_id(log, "Unity", 1913667),
+            20,
+        )
+
     def test_two_dsv_srv_cycles_keep_actual_and_tracked_layouts_equal(self):
         state = LayoutState()
 
@@ -400,14 +432,26 @@ class D32S8ImportContractTest(unittest.TestCase):
         ).read_text()
         self.assertIn("ALLOW_LIVE_WALKABOUT", walkabout_runner)
         self.assertIn("no established WiVRn headset transport", walkabout_runner)
-        self.assertIn("latest presence event does not say the headset is worn", walkabout_runner)
+        self.assertIn("headset presence is not active", walkabout_runner)
         self.assertIn("before_xids=", walkabout_runner)
-        self.assertIn("application_name: 'Unity'", walkabout_runner)
-        self.assertIn("timeout_count=([5-9]|[1-9][0-9]+)", walkabout_runner)
-        self.assertIn("app='Unity'", walkabout_runner)
-        self.assertIn("SECONDS - unity_connected_at >= 20", walkabout_runner)
+        self.assertIn("--application Unity", walkabout_runner)
+        self.assertIn('--application Unity --pid "$walkabout_pid"', walkabout_runner)
+        self.assertIn("--print-client-id", walkabout_runner)
+        self.assertIn("WINEOPENXR_STAGED_CROSS_GPU_COLOR=1", walkabout_runner)
+        self.assertIn("WINEDLLOVERRIDES='d3d11=n;dxgi=n'", walkabout_runner)
+        self.assertIn("walkabout.xr-environ", walkabout_runner)
+        self.assertNotIn('>"$artifact_dir/walkabout.environ"', walkabout_runner)
+        self.assertIn("Shared Depth Buffer: Yes", walkabout_runner)
+        self.assertIn("XRTextureManager::SetupRenderTextureFromXRRequest", walkabout_runner)
+        self.assertIn("walkabout.mapped-artifacts.sha256", walkabout_runner)
+        self.assertIn("WalkaboutMiniGolf_dxgi.log", walkabout_runner)
+        self.assertIn("WalkaboutMiniGolf_d3d11.log", walkabout_runner)
+        self.assertIn('Client $unity_client_id disconnected', walkabout_runner)
+        self.assertIn("SECONDS - workload_ready_at >= healthy_seconds", walkabout_runner)
         self.assertIn('WINEPREFIX="$prefix_dir" "$wineserver" -k', walkabout_runner)
-        self.assertIn("exit 99", walkabout_runner)
+        self.assertIn("status=99", walkabout_runner)
+        self.assertIn("--after-cursor", walkabout_runner)
+        self.assertNotIn("strace", walkabout_runner)
 
         for usage in (
             "XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL",

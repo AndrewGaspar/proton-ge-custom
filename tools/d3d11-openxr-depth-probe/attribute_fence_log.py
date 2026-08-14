@@ -14,23 +14,46 @@ RECOVERED = re.compile(r"Client fence recovered after (\d+) timeout\(s\): client
 ATTRIBUTION = re.compile(r"Client fence attribution enabled: client=(\d+) ")
 
 
-def classify(
-    text: str, application: str, persistent_count: int, runtime_capable: bool = False
-) -> int:
+def parse_descriptions(text: str) -> dict[int, dict[str, int | str]]:
     described_id = None
-    applications = []
+    descriptions: dict[int, dict[str, int | str]] = {}
     for line in text.splitlines():
         id_match = re.search(r"\bid: (\d+)\s*$", line)
         if id_match:
             described_id = int(id_match.group(1))
+            descriptions.setdefault(described_id, {})
             continue
         app_match = re.search(r"application_name: '([^']*)'", line)
         if app_match and described_id is not None:
-            applications.append((described_id, app_match.group(1)))
+            descriptions[described_id]["application"] = app_match.group(1)
+            continue
+        pid_match = re.search(r"\bpid: (\d+)\s*$", line)
+        if pid_match and described_id is not None:
+            descriptions[described_id]["pid"] = int(pid_match.group(1))
             described_id = None
+    return descriptions
 
-    target_ids = [client_id for client_id, app in applications if app == application]
-    target_id = target_ids[-1] if target_ids else None
+
+def find_target_client_id(text: str, application: str, pid: int | None = None):
+    descriptions = parse_descriptions(text)
+    target_ids = [
+        client_id
+        for client_id, description in descriptions.items()
+        if description.get("application") == application
+        and (pid is None or description.get("pid") == pid)
+    ]
+    return target_ids[-1] if target_ids else None
+
+
+def classify(
+    text: str,
+    application: str,
+    persistent_count: int,
+    runtime_capable: bool = False,
+    pid: int | None = None,
+) -> int:
+    target_id = find_target_client_id(text, application, pid)
+
     untagged = 0
     timeout_counts = []
     terminal = False
@@ -64,7 +87,11 @@ def classify(
         )
         return 1
     if target_id is None:
-        print(f"WARN: no IPC client description found for {application}; attribution unavailable")
+        qualifier = f" with PID {pid}" if pid is not None else ""
+        print(
+            f"WARN: no IPC client description found for {application}{qualifier}; "
+            "attribution unavailable"
+        )
         return 2
     if target_id not in attributed_clients and not runtime_capable:
         print(
@@ -91,10 +118,23 @@ def main() -> int:
     parser.add_argument("--application", default="d3d11-openxr-depth-probe")
     parser.add_argument("--persistent-count", type=int, default=5)
     parser.add_argument("--runtime-capable", action="store_true")
+    parser.add_argument("--pid", type=int)
+    parser.add_argument("--print-client-id", action="store_true")
     args = parser.parse_args()
     with open(args.log, encoding="utf-8", errors="replace") as stream:
+        text = stream.read()
+        if args.print_client_id:
+            target_id = find_target_client_id(text, args.application, args.pid)
+            if target_id is None:
+                return 2
+            print(target_id)
+            return 0
         return classify(
-            stream.read(), args.application, args.persistent_count, args.runtime_capable
+            text,
+            args.application,
+            args.persistent_count,
+            args.runtime_capable,
+            args.pid,
         )
 
 
