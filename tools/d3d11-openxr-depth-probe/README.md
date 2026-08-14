@@ -268,9 +268,12 @@ ordering, cross-GPU import, or the mixed color/depth failure hypothesis.
 ## Guarded Walkabout launch
 
 The separate harness validates the active WiVRn service, an established
-headset transport, a latest presence event of "headset is worn", the locally
-built Heroic Meta runner, the installed game, and an idle Walkabout process
-before launch:
+headset transport, the live compositor's focused/visible/present state, the
+locally built Heroic Meta runner, the exact matched WineOpenXR PE/Unix pair,
+the native DXVK payload and prefix copies, and an idle Walkabout process before
+launch. It also pins build 780 and verifies that only the two required
+non-Oculus compatibility bytes are changed while both known depth paths remain
+enabled:
 
 ```sh
 bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh check
@@ -278,12 +281,25 @@ ALLOW_LIVE_WALKABOUT=1 \
   bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh run
 ```
 
-`run` performs exactly one bounded Heroic protocol launch. It snapshots the
-kernel Xid count, watches for Unity's WiVRn connection and tagged terminal or
-persistent Unity client-fence waits, stops immediately on either failure, and
-finally stops only the
-exact Meta prefix with GE-Proton's own wineserver. Logs, the final `Player.log`,
-process snapshots, and a machine-readable classification are retained below
+`run` performs exactly one bounded Heroic protocol launch. The staging flag,
+native D3D11/DXGI overrides, and a run-specific DXVK log directory are passed
+to the Heroic Electron process and inherited by the official Meta launch
+chain. The harness identifies the exact Walkabout PID, saves only the relevant
+OpenXR/DXVK environment keys, and waits for a fresh `Player.log` that reports
+`Shared Depth Buffer: Yes` plus a non-null depth texture request before
+starting the 20-second health window. At that point it snapshots the process
+maps and requires the hash-verified WineOpenXR PE/Unix pair and native
+D3D11/DXGI files to be mapped. The exact DXVK D3D11 and DXGI logs must identify
+the NVIDIA adapter.
+
+The kernel Xid count and exact Unity-client disconnect are checked throughout.
+On every outcome the harness first stops its recorded Heroic launcher, then stops
+only the exact Meta prefix with GE-Proton's wineserver, drains diagnostics for
+two seconds, and then attributes terminal or persistent fence waits from the
+cursor-scoped WiVRn log to the exact Unity PID. A late Xid or unattributable fence result overrides apparent
+success. Heroic output, filtered environment and maps, DXVK logs, OAF output,
+the final `Player.log`, process snapshots, hashes, and a machine-readable
+classification are retained below
 `${XDG_STATE_HOME:-$HOME/.local/state}/hypxrland/walkabout-d32s8`.
 
 The source-contract test does not need a runtime or GPU. `bootstrap` does not
