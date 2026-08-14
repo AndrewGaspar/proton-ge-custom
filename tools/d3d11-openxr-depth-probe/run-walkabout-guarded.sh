@@ -243,6 +243,7 @@ finish()
   local result=$2
   local after_xids
   local attribution_status=0
+  local heroic_pgid
 
   (( finalized == 0 )) || return
   finalized=1
@@ -250,7 +251,12 @@ finish()
   classification=$result
 
   if [[ -n "$heroic_pid" ]] && kill -0 "$heroic_pid" 2>/dev/null; then
-    kill -- "-$heroic_pid" 2>/dev/null || kill "$heroic_pid" 2>/dev/null || true
+    heroic_pgid=$(ps -o pgid= -p "$heroic_pid" 2>/dev/null | tr -d ' ' || true)
+    if [[ "$heroic_pgid" == "$heroic_pid" ]]; then
+      kill -- "-$heroic_pid" 2>/dev/null || true
+    else
+      kill "$heroic_pid" 2>/dev/null || true
+    fi
     wait "$heroic_pid" 2>/dev/null || true
   fi
   stop_exact_prefix
