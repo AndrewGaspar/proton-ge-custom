@@ -24,6 +24,12 @@ case "$stage" in
 esac
 
 umu_env=(env -u HYPRLAND_INSTANCE_SIGNATURE)
+probe_dll_overrides=${WINEDLLOVERRIDES:-}
+if [[ -n "$probe_dll_overrides" ]]; then
+  probe_dll_overrides+=';'
+fi
+probe_dll_overrides+='d3d11=n;dxgi=n'
+umu_env+=(WINEDLLOVERRIDES="$probe_dll_overrides")
 if [[ -n ${WINEOPENXR_STAGED_CROSS_GPU_COLOR:-} ]]; then
   umu_env+=(WINEOPENXR_STAGED_CROSS_GPU_COLOR="$WINEOPENXR_STAGED_CROSS_GPU_COLOR")
   echo "INFO: propagating WINEOPENXR_STAGED_CROSS_GPU_COLOR=$WINEOPENXR_STAGED_CROSS_GPU_COLOR to Proton"

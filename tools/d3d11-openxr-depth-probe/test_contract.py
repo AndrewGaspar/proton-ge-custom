@@ -259,6 +259,9 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn('umu_env+=(WINEOPENXR_STAGED_CROSS_GPU_COLOR="$WINEOPENXR_STAGED_CROSS_GPU_COLOR")', runner)
         self.assertIn("GAMEID=999999999", runner)
         self.assertIn("PROTON_VERB=runinprefix", runner)
+        self.assertIn("probe_dll_overrides=${WINEDLLOVERRIDES:-}", runner)
+        self.assertIn("probe_dll_overrides+='d3d11=n;dxgi=n'", runner)
+        self.assertIn('umu_env+=(WINEDLLOVERRIDES="$probe_dll_overrides")', runner)
         self.assertNotIn("PROTON_VERB=run ", runner)
         self.assertIn("compat_data_dir=/home/ajg/Games/Heroic/Prefixes/MetaHorizon", runner)
         self.assertIn('WINEPREFIX="$compat_data_dir"', runner)
@@ -288,6 +291,11 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("--runtime-capable", runner)
         self.assertNotIn("grep -Fq 'Waiting on client fence", runner)
         self.assertIn("cleanup: complete", runner)
+
+        self.assertIn("verify_dxvk_interop_device(device)", probe)
+        self.assertIn("0x93, 0x25", probe)
+        self.assertIn("verified DXVK IDXGIVkInteropDevice2 support", probe)
+        self.assertIn("DXVK interop preflight complete", probe)
 
         readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
         attended_commands = readme.split("OPENXR_LOADER_DLL=", 1)[1].split("```", 1)[0]
