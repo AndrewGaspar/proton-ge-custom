@@ -451,6 +451,7 @@ Aug 13 21:46:59.837998 framework wivrn-server[790066]:         pid: 1913667
         self.assertIn('find_heroic_lock_holders', walkabout_runner)
         self.assertIn('ELECTRON_RENDERER_URL="file://$heroic_build/index.html"', walkabout_runner)
         self.assertIn('"$heroic_electron" . --no-gui "$game_url"', walkabout_runner)
+        self.assertIn('[[ "$heroic_pgid" == "$heroic_pid" ]]', walkabout_runner)
         self.assertIn('Client $unity_client_id disconnected', walkabout_runner)
         self.assertIn("SECONDS - workload_ready_at >= healthy_seconds", walkabout_runner)
         self.assertIn('WINEPREFIX="$prefix_dir" "$wineserver" -k', walkabout_runner)
