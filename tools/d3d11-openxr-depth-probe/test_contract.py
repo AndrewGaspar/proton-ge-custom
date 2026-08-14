@@ -449,6 +449,8 @@ Aug 13 21:46:59.837998 framework wivrn-server[790066]:         pid: 1913667
         self.assertIn('sha256sum "$mapped_wineopenxr_pe"', walkabout_runner)
         self.assertIn("WalkaboutMiniGolf_dxgi.log", walkabout_runner)
         self.assertIn("WalkaboutMiniGolf_d3d11.log", walkabout_runner)
+        self.assertIn("DXVK: 2.7.1", walkabout_runner)
+        self.assertNotIn("DXVK: v2.7.1", walkabout_runner)
         self.assertIn('expected_heroic_build=', walkabout_runner)
         self.assertIn('expected_heroic_electron=', walkabout_runner)
         self.assertIn('find_heroic_lock_holders', walkabout_runner)
