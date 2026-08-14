@@ -442,6 +442,25 @@ Aug 13 21:46:59.837998 framework wivrn-server[790066]:         pid: 1913667
         self.assertIn("walkabout.xr-environ", walkabout_runner)
         self.assertNotIn('>"$artifact_dir/walkabout.environ"', walkabout_runner)
         self.assertIn("Shared Depth Buffer: Yes", walkabout_runner)
+        self.assertIn(
+            "Requested Stereo Rendering Mode Single Pass Instanced",
+            walkabout_runner,
+        )
+        self.assertIn(
+            "Unity will render to eye texture(s) of format: Texture Array",
+            walkabout_runner,
+        )
+        self.assertIn(
+            "The Oculus eye layer has texture(s) of format: Texture Array",
+            walkabout_runner,
+        )
+        self.assertIn(
+            "expected_oculus_xr=480d206df6d3741c91e567fe5c496c5be1b59f22612b980b7b930d918ea35e9c",
+            walkabout_runner,
+        )
+        self.assertIn('require_bytes "$oculus_xr_plugin" 41068 2 85c9', walkabout_runner)
+        self.assertNotIn('require_bytes "$oculus_xr_plugin" 41068 2 31c9', walkabout_runner)
+        self.assertIn("unity-survived-with-staged-color-single-pass", walkabout_runner)
         self.assertIn("XRTextureManager::SetupRenderTextureFromXRRequest", walkabout_runner)
         self.assertIn("walkabout.mapped-artifacts.sha256", walkabout_runner)
         self.assertIn('mapped_wineopenxr_pe=$prefix_wineopenxr_pe', walkabout_runner)
