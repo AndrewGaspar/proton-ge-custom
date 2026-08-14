@@ -152,6 +152,18 @@ start unless `WINEOPENXR_STAGED_CROSS_GPU_COLOR=1` is explicit. The captured
 diagnostics also preserve the first/average/maximum copy time for later cost
 analysis.
 
+Projection stages follow Monado's frame-driven session transition contract.
+After beginning at `READY`, the probe interleaves event draining with complete
+`xrWaitFrame`/`xrBeginFrame`/`xrEndFrame` cycles; a non-renderable frame is
+ended empty before polling for the resulting `SYNCHRONIZED`, `VISIBLE`, and
+`FOCUSED` transitions. Readiness has a ten-second wall-clock bound and requires
+at least `VISIBLE` before drawing even when `shouldRender` is true. Once the
+first frame renders, the actual workload retains its three-second and 120-frame
+bounds. The probe sleeps briefly after an immediately non-renderable frame and
+rate-limits diagnostics instead of exhausting a fixed readiness attempt count.
+`STOPPING` is paired with `xrEndSession`; `EXITING` and `LOSS_PENDING` abort with
+normal resource cleanup.
+
 The runner records WiVRn from a journal cursor through a two-second teardown
 drain. New WiVRn builds identify every asynchronous client-fence warning by IPC
 client, PID, application, frame, and consecutive timeout count. The runner

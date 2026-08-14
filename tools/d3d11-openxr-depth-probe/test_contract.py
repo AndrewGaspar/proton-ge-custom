@@ -66,7 +66,49 @@ class LayoutState:
             raise AssertionError(f"{left} != {right}")
 
 
+def model_frame_pump(initial_events, frames):
+    """Model READY/begin followed by interleaved frame and event pumping."""
+    if "READY" not in initial_events:
+        return "not-begun"
+    state = initial_events[-1]
+    for should_render, events_after_end in frames:
+        if any(state in ("STOPPING", "EXITING", "LOSS_PENDING")
+               for state in events_after_end):
+            return "stopped"
+        if events_after_end:
+            state = events_after_end[-1]
+        if should_render and state in ("VISIBLE", "FOCUSED"):
+            return "rendered"
+    return "timeout"
+
+
 class D32S8ImportContractTest(unittest.TestCase):
+    def test_session_lifecycle_interleaves_frames_and_event_polls(self):
+        self.assertEqual(model_frame_pump(["IDLE"], []), "not-begun")
+        self.assertEqual(
+            model_frame_pump(
+                ["IDLE", "READY"],
+                [
+                    (False, ["SYNCHRONIZED"]),
+                    (False, ["VISIBLE", "FOCUSED"]),
+                    (True, []),
+                ],
+            ),
+            "rendered",
+        )
+        self.assertEqual(
+            model_frame_pump(["READY"], [(False, ["STOPPING"])]),
+            "stopped",
+        )
+        self.assertEqual(
+            model_frame_pump(["READY"], [(False, [])] * 3),
+            "timeout",
+        )
+        self.assertEqual(
+            model_frame_pump(["READY"], [(True, ["SYNCHRONIZED"])]),
+            "timeout",
+        )
+
     def test_fence_attribution_ignores_other_clients(self):
         log = """
  id: 1
@@ -202,7 +244,7 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("end_aborted_frame", probe)
         self.assertIn('xrEndFrame(abort recovery)', probe)
         self.assertIn("cleanup_projection_resources", probe)
-        self.assertIn("constexpr uint32_t maxFrameAttempts = 120;", probe)
+        self.assertIn("constexpr uint32_t maxRenderedFrames = 120;", probe)
         self.assertIn('std::strcmp(stage, "unity")', probe)
         self.assertIn("colorImages != 6 || depthImages != 6", probe)
         self.assertIn("destroyed Unity-style first generation before rendering", probe)
@@ -214,7 +256,7 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn('log_phase("draw-depth acquire/wait begin")', probe)
         self.assertIn('"draw-depth event fence complete"', probe)
         self.assertIn('"draw-depth release complete"', probe)
-        frame_loop = probe.split("for (uint32_t attempt = 0;", 1)[1].split(
+        frame_loop = probe.split("static bool run_projection_frame", 1)[1].split(
             'std::printf("completed %u rendered projection frames', 1
         )[0]
         self.assertGreaterEqual(frame_loop.count("end_aborted_frame("), 3)
@@ -306,6 +348,35 @@ class D32S8ImportContractTest(unittest.TestCase):
         self.assertIn("0x93, 0x25", probe)
         self.assertIn("verified DXVK IDXGIVkInteropDevice2 support", probe)
         self.assertIn("DXVK interop preflight complete", probe)
+        self.assertIn("PFN_xrEndSession endSession", probe)
+        self.assertIn('load_xr(xr, instance, "xrEndSession", xr.endSession)', probe)
+        running_events = probe.split("static bool poll_running_session_events", 1)[1].split(
+            "static bool end_aborted_frame", 1
+        )[0]
+        self.assertIn("XR_SESSION_STATE_STOPPING", running_events)
+        self.assertIn("xr.endSession(session)", running_events)
+        self.assertIn("XR_SESSION_STATE_EXITING", running_events)
+        self.assertIn("XR_SESSION_STATE_LOSS_PENDING", running_events)
+        self.assertIn("session reached SYNCHRONIZED", running_events)
+        self.assertIn("session reached render-visible state", running_events)
+        projection_frame = probe.split("static bool run_projection_frame", 1)[1].split(
+            "static bool\nclear_depth_swapchain", 1
+        )[0]
+        self.assertIn("std::chrono::seconds(10)", projection_frame)
+        self.assertIn("std::chrono::seconds(3)", projection_frame)
+        self.assertIn("readinessDeadline", projection_frame)
+        self.assertIn("renderDeadline", projection_frame)
+        self.assertIn("XR_SESSION_STATE_VISIBLE", projection_frame)
+        self.assertIn("XR_SESSION_STATE_FOCUSED", projection_frame)
+        self.assertIn("poll_running_session_events", projection_frame)
+        self.assertIn("std::this_thread::sleep_for(std::chrono::milliseconds(10))", projection_frame)
+        self.assertIn("xr.endFrame(session, &endInfo)", projection_frame)
+        self.assertLess(
+            projection_frame.index('xr.endFrame(session, &endInfo), "xrEndFrame(no layers)"'),
+            projection_frame.index("poll_running_session_events", projection_frame.index("if (!frameState.shouldRender")),
+        )
+        self.assertIn("maxRenderedFrames", projection_frame)
+        self.assertNotIn("maxFrameAttempts", projection_frame)
 
         readme = (PROTON_ROOT / "tools/d3d11-openxr-depth-probe/README.md").read_text()
         attended_commands = readme.split("OPENXR_LOADER_DLL=", 1)[1].split("```", 1)[0]
