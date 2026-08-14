@@ -269,7 +269,8 @@ ordering, cross-GPU import, or the mixed color/depth failure hypothesis.
 
 The separate harness validates the active WiVRn service, an established
 headset transport, the live compositor's focused/visible/present state, the
-locally built Heroic Meta runner, the exact matched WineOpenXR PE/Unix pair,
+complete locally built Heroic Meta runner, the exact matched WineOpenXR PE/Unix
+pair,
 the native DXVK payload and prefix copies, and an idle Walkabout process before
 launch. It also pins build 780 and verifies that only the two required
 non-Oculus compatibility bytes are changed while both known depth paths remain
@@ -281,7 +282,17 @@ ALLOW_LIVE_WALKABOUT=1 \
   bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh run
 ```
 
-`run` performs exactly one bounded Heroic protocol launch. The staging flag,
+`run` performs exactly one bounded Heroic protocol launch. The installed
+`/opt/Heroic/heroic` package is deliberately not used: its upstream bundle does
+not contain the custom Meta runner. The harness instead verifies the hash of
+the custom main bundle, the complete electron-vite build tree, its Electron
+host, and its package manifest. It refuses to run while either installed or
+custom Heroic owns the single-instance lock. The local Electron host is given
+the pinned built renderer through `ELECTRON_RENDERER_URL`; this preserves the
+real Heroic configuration and reaches `frontendReady` without relying on the
+missing source-tree `public/index.html`.
+
+The staging flag,
 native D3D11/DXGI overrides, and a run-specific DXVK log directory are passed
 to the Heroic Electron process and inherited by the official Meta launch
 chain. The harness identifies the exact Walkabout PID, saves only the relevant
