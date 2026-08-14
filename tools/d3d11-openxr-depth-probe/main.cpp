@@ -267,6 +267,25 @@ create_matching_device(const LUID & wantedLuid, ID3D11Device ** device, ID3D11De
 }
 
 static bool
+verify_dxvk_interop_device(ID3D11Device * device)
+{
+    static constexpr GUID iidDxgiVkInteropDevice2{
+        0xe2ef5fa5,
+        0xdc21,
+        0x4af7,
+        {0x90, 0xc4, 0xf6, 0x7e, 0xf6, 0xa0, 0x93, 0x25},
+    };
+    IUnknown * interop = nullptr;
+    const HRESULT result = device->QueryInterface(iidDxgiVkInteropDevice2,
+                                                   reinterpret_cast<void **>(&interop));
+    if (!hr_ok(result, "ID3D11Device::QueryInterface(IDXGIVkInteropDevice2)"))
+        return false;
+    release(interop);
+    std::printf("verified DXVK IDXGIVkInteropDevice2 support\n");
+    return true;
+}
+
+static bool
 wait_for_gpu(ID3D11Device * device, ID3D11DeviceContext * context)
 {
     D3D11_QUERY_DESC queryDesc{D3D11_QUERY_EVENT, 0};
@@ -1205,6 +1224,9 @@ int main(int argc, char ** argv)
     if (create_matching_device(requirements.adapterLuid, &device, &context) != 0)
         return 1;
     log_phase("D3D11 device creation complete");
+    if (!verify_dxvk_interop_device(device))
+        return 1;
+    log_phase("DXVK interop preflight complete");
 
     XrGraphicsBindingD3D11KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR};
     binding.device = device;

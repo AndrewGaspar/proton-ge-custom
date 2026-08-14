@@ -130,6 +130,16 @@ passes the Meta Proton compatibility-data directory to UMU, not its inner
 selects the existing `pfx` child. The runner does not start, restart, or deploy
 WiVRn or kill any Wine process.
 
+`runinprefix` deliberately skips Proton's normal game setup, including its
+DXVK DLL selection. The runner therefore appends
+`d3d11=n;dxgi=n` to the existing `WINEDLLOVERRIDES`, explicitly verifies
+`IDXGIVkInteropDevice2` on the created device, and refuses to call
+`xrCreateSession` if that private DXVK interface is unavailable. Without that
+override, Wine's built-in D3D11 implementation can create a device but cannot
+expose the private interop interface; WineOpenXR consequently returns
+`XR_ERROR_VALIDATION_FAILURE` from `xrCreateSession` before creating a
+swapchain or submitting GPU work.
+
 The runner records WiVRn from a journal cursor through a two-second teardown
 drain. New WiVRn builds identify every asynchronous client-fence warning by IPC
 client, PID, application, frame, and consecutive timeout count. The runner
