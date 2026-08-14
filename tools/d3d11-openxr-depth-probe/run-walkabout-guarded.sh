@@ -10,8 +10,10 @@ proton_dir=/home/ajg/.config/heroic/tools/proton/GE-Proton10-32
 wineserver="$proton_dir/files/bin/wineserver"
 player_log="$prefix_dir/drive_c/users/steamuser/AppData/LocalLow/Mighty Coconut/Walkabout Mini Golf/Player.log"
 oaf_log="$prefix_dir/drive_c/users/steamuser/AppData/Local/HeroicMeta/oaf.jsonl"
-heroic_electron="$heroic_root/node_modules/.bin/electron"
+heroic_electron="$heroic_root/node_modules/electron/dist/electron"
+heroic_build="$heroic_root/build"
 heroic_main="$heroic_root/build/main/main.js"
+heroic_package="$heroic_root/package.json"
 game_dir="$prefix_dir/drive_c/MetaGames/Software/mighty-coconut-walkabout-mini-golf"
 plugins_dir="$game_dir/WalkaboutMiniGolf_Data/Plugins/x86_64"
 ovr_plugin="$plugins_dir/OVRPlugin.dll"
@@ -39,6 +41,9 @@ expected_oculus_xr=cfde3a993a9ea64c8008fec795b79ce303952df49a3ca9ccec2f8265032ba
 expected_walkabout=543a6fe5f0c9218e70b59787b38f86e3c597dc3e70cd5f67895cf1f008f639f1
 expected_wineopenxr_json=414d9c592a68ee6051441aab8b0df2437f3448e5f96003c25fc7a40d152d6316
 expected_heroic_main=e7748b515afe02550f0668f30d616e00e835a41bcc257f57deb5f376b3b0929f
+expected_heroic_build=204931131c07372280f9d4dafef0704acb86b6d670cfdcc68c92bd455be81e03
+expected_heroic_electron=86c4ad14174d04fdc9e52537ac386c807ffd2757452190cb8a1fdbb39b02d01e
+expected_heroic_package=59080b51746e0c289aadf48c8a6cda1f87c27d004471d7d40d951b6a4f8f946c
 
 case "$mode" in
   check|run) ;;
@@ -76,16 +81,52 @@ require_bytes()
     fail "unexpected bytes in $path at offset $offset: $actual (expected $expected)"
 }
 
-for command in journalctl ss jq sha256sum readelf strings od hyprctl pgrep python3; do
+tree_hash()
+{
+  local root=$1
+
+  (
+    cd "$root"
+    find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+  ) | sha256sum | awk '{print $1}'
+}
+
+find_heroic_lock_holders()
+{
+  local proc exe
+
+  for proc in /proc/[0-9]*; do
+    exe=$(readlink "$proc/exe" 2>/dev/null || true)
+    case "$exe" in
+      "$heroic_electron"|/opt/Heroic/heroic)
+        printf '%s\n' "${proc##*/}"
+        ;;
+    esac
+  done
+}
+
+for command in journalctl ss jq sha256sum readelf strings od hyprctl pgrep python3 find sort xargs readlink setsid; do
   command -v "$command" >/dev/null || fail "$command is required"
 done
 
 systemctl --user is-active --quiet wivrn.service || fail "wivrn.service is not active"
 [[ -x "$wineserver" ]] || fail "exact GE-Proton wineserver is missing: $wineserver"
 [[ -x "$heroic_electron" ]] || fail "the local Heroic Electron launcher is missing: $heroic_electron"
+[[ -d "$heroic_build" ]] || fail "the complete local Heroic build is missing: $heroic_build"
 [[ -f "$heroic_main" ]] || fail "the local Heroic main bundle is missing: $heroic_main"
+[[ -f "$heroic_build/index.html" ]] || fail "the local Heroic renderer is missing"
+[[ -f "$heroic_build/preload/index.js" ]] || fail "the local Heroic preload is missing"
+[[ -f "$heroic_package" ]] || fail "the local Heroic package manifest is missing"
 grep -q 'Meta Horizon shared runtime' "$heroic_main" ||
   fail "the local Heroic bundle does not contain the Meta runner"
+require_hash "$heroic_electron" "$expected_heroic_electron"
+require_hash "$heroic_package" "$expected_heroic_package"
+actual_heroic_build=$(tree_hash "$heroic_build")
+[[ "$actual_heroic_build" == "$expected_heroic_build" ]] ||
+  fail "unexpected local Heroic build tree SHA256: $actual_heroic_build (expected $expected_heroic_build)"
+heroic_lock_holders=$(find_heroic_lock_holders)
+[[ -z "$heroic_lock_holders" ]] ||
+  fail "Heroic already owns the single-instance lock (PIDs: ${heroic_lock_holders//$'\n'/,}); stop it before testing"
 
 build_id=$(jq -r '.installed[] | select(.appName == "mighty-coconut-walkabout-mini-golf") | .buildId' "$installed_json")
 [[ "$build_id" == 780 ]] || fail "Walkabout buildId is $build_id, expected 780"
@@ -209,7 +250,7 @@ finish()
   classification=$result
 
   if [[ -n "$heroic_pid" ]] && kill -0 "$heroic_pid" 2>/dev/null; then
-    kill "$heroic_pid" 2>/dev/null || true
+    kill -- "-$heroic_pid" 2>/dev/null || kill "$heroic_pid" 2>/dev/null || true
     wait "$heroic_pid" 2>/dev/null || true
   fi
   stop_exact_prefix
@@ -279,8 +320,9 @@ printf '%s\n' "$xr_status" >"$artifact_dir/openxr-status-before.txt"
 
 (
   cd "$heroic_root"
-  exec env \
+  exec setsid env \
     HYPRLAND_INSTANCE_SIGNATURE="$instance_signature" \
+    ELECTRON_RENDERER_URL="file://$heroic_build/index.html" \
     WINEOPENXR_STAGED_CROSS_GPU_COLOR=1 \
     WINEDLLOVERRIDES='d3d11=n;dxgi=n' \
     DXVK_LOG_LEVEL=info \
