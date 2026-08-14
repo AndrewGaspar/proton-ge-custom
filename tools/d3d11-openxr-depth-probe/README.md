@@ -140,6 +140,18 @@ expose the private interop interface; WineOpenXR consequently returns
 `XR_ERROR_VALIDATION_FAILURE` from `xrCreateSession` before creating a
 swapchain or submitting GPU work.
 
+When staged color is requested, the runner enables only WineOpenXR's Wine debug
+channel and saves the entire UMU process output as `runner.stdout.log` and
+`runner.stderr.log` alongside the probe-owned logs. Staged color stages are not
+certified from the environment flag alone: the runner requires WineOpenXR's
+session-activation diagnostic and GPU-timestamped proxy-to-transport copies,
+and rejects either a failed copy submission or an unsupported color-swapchain
+fallback. Stereo `frame` and `unity` stages require at least two measured
+copies, covering both recreated eye swapchains. The `unity` stage refuses to
+start unless `WINEOPENXR_STAGED_CROSS_GPU_COLOR=1` is explicit. The captured
+diagnostics also preserve the first/average/maximum copy time for later cost
+analysis.
+
 The runner records WiVRn from a journal cursor through a two-second teardown
 drain. New WiVRn builds identify every asynchronous client-fence warning by IPC
 client, PID, application, frame, and consecutive timeout count. The runner
