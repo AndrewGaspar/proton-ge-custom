@@ -180,6 +180,7 @@ struct SXrFunctions
     PFN_xrDestroySession destroySession = nullptr;
     PFN_xrPollEvent pollEvent = nullptr;
     PFN_xrBeginSession beginSession = nullptr;
+    PFN_xrEndSession endSession = nullptr;
     PFN_xrWaitFrame waitFrame = nullptr;
     PFN_xrBeginFrame beginFrame = nullptr;
     PFN_xrEndFrame endFrame = nullptr;
@@ -805,7 +806,7 @@ static bool draw_mixed_pair_with_depth_disabled(
 }
 
 static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
-                                 XrSession session) {
+                                 XrSession session, XrSessionState &state) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -824,15 +825,23 @@ static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
         *reinterpret_cast<const XrEventDataSessionStateChanged *>(&event);
     if (changed.session != session)
       continue;
+    state = changed.state;
     std::printf("session state changed to %d\n",
                 static_cast<int>(changed.state));
+    if (changed.state == XR_SESSION_STATE_SYNCHRONIZED)
+      std::printf("session reached SYNCHRONIZED\n");
+    if (changed.state == XR_SESSION_STATE_VISIBLE ||
+        changed.state == XR_SESSION_STATE_FOCUSED)
+      std::printf("session reached render-visible state %d\n",
+                  static_cast<int>(changed.state));
     if (changed.state == XR_SESSION_STATE_READY) {
       XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
       beginInfo.primaryViewConfigurationType =
           XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
       return xr_ok(xr.beginSession(session, &beginInfo), "xrBeginSession");
     }
-    if (changed.state == XR_SESSION_STATE_EXITING ||
+    if (changed.state == XR_SESSION_STATE_STOPPING ||
+        changed.state == XR_SESSION_STATE_EXITING ||
         changed.state == XR_SESSION_STATE_LOSS_PENDING) {
       std::fprintf(stderr,
                    "FAIL: session entered terminal state %d before READY\n",
@@ -843,6 +852,50 @@ static bool begin_stereo_session(const SXrFunctions &xr, XrInstance instance,
 
   std::fprintf(stderr, "FAIL: session did not reach READY within 20 seconds\n");
   return false;
+}
+
+static bool poll_running_session_events(const SXrFunctions &xr,
+                                        XrInstance instance,
+                                        XrSession session,
+                                        XrSessionState &state,
+                                        bool &stopped) {
+  stopped = false;
+  while (true) {
+    XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
+    const XrResult result = xr.pollEvent(instance, &event);
+    if (result == XR_EVENT_UNAVAILABLE)
+      return true;
+    if (!xr_ok(result, "xrPollEvent(running session)"))
+      return false;
+    if (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+      continue;
+
+    const auto &changed =
+        *reinterpret_cast<const XrEventDataSessionStateChanged *>(&event);
+    if (changed.session != session)
+      continue;
+    state = changed.state;
+    std::printf("session state changed to %d\n",
+                static_cast<int>(changed.state));
+    if (changed.state == XR_SESSION_STATE_SYNCHRONIZED)
+      std::printf("session reached SYNCHRONIZED\n");
+    if (changed.state == XR_SESSION_STATE_VISIBLE ||
+        changed.state == XR_SESSION_STATE_FOCUSED)
+      std::printf("session reached render-visible state %d\n",
+                  static_cast<int>(changed.state));
+    if (changed.state == XR_SESSION_STATE_STOPPING) {
+      if (!xr_ok(xr.endSession(session), "xrEndSession(STOPPING)"))
+        return false;
+      stopped = true;
+      return true;
+    }
+    if (changed.state == XR_SESSION_STATE_EXITING ||
+        changed.state == XR_SESSION_STATE_LOSS_PENDING) {
+      std::fprintf(stderr, "FAIL: running session entered terminal state %d\n",
+                   static_cast<int>(changed.state));
+      return false;
+    }
+  }
 }
 
 static bool end_aborted_frame(const SXrFunctions &xr, XrSession session,
@@ -876,7 +929,8 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
                                  std::array<SColorSwapchain, 2> &colors,
                                  std::array<SDepthSwapchain, 2> &depths,
                                  uint32_t width, uint32_t height) {
-  if (!begin_stereo_session(xr, instance, session))
+  XrSessionState sessionState = XR_SESSION_STATE_UNKNOWN;
+  if (!begin_stereo_session(xr, instance, session, sessionState))
     return false;
 
   XrReferenceSpaceCreateInfo spaceInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -893,14 +947,30 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
              "ID3D11DeviceContext::QueryInterface(ID3D11DeviceContext1)"))
     return cleanup_projection_resources(xr, space, context1, false);
 
-  constexpr uint32_t maxFrameAttempts = 120;
-  const auto frameDeadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  const auto readinessDeadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  std::chrono::steady_clock::time_point renderDeadline{};
+  constexpr uint32_t maxRenderedFrames = 120;
+  uint32_t frameAttempts = 0;
   uint32_t renderedFrames = 0;
-  for (uint32_t attempt = 0;
-       attempt < maxFrameAttempts &&
-       std::chrono::steady_clock::now() < frameDeadline;
-       attempt++) {
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!renderedFrames && now >= readinessDeadline)
+      break;
+    if (renderedFrames &&
+        (renderedFrames >= maxRenderedFrames || now >= renderDeadline))
+      break;
+    const uint32_t attempt = frameAttempts++;
+    bool stopped = false;
+    if (!poll_running_session_events(xr, instance, session, sessionState,
+                                     stopped))
+      return cleanup_projection_resources(xr, space, context1, false);
+    if (stopped) {
+      std::fprintf(stderr,
+                   "FAIL: session stopped before the projection workload "
+                   "completed\n");
+      return cleanup_projection_resources(xr, space, context1, false);
+    }
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     if (!xr_ok(xr.waitFrame(session, &waitInfo, &frameState), "xrWaitFrame"))
@@ -909,13 +979,29 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
     if (!xr_ok(xr.beginFrame(session, &beginInfo), "xrBeginFrame"))
       return cleanup_projection_resources(xr, space, context1, false);
 
-    if (!frameState.shouldRender) {
+    const bool visible = sessionState == XR_SESSION_STATE_VISIBLE ||
+                         sessionState == XR_SESSION_STATE_FOCUSED;
+    if (!frameState.shouldRender || !visible) {
       XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
       endInfo.displayTime = frameState.predictedDisplayTime;
       endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
       if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(no layers)"))
         return cleanup_projection_resources(xr, space, context1, false);
-      std::printf("frame attempt %u was not renderable\n", attempt);
+      if (!poll_running_session_events(xr, instance, session, sessionState,
+                                       stopped))
+        return cleanup_projection_resources(xr, space, context1, false);
+      if (stopped) {
+        std::fprintf(stderr,
+                     "FAIL: session stopped while waiting for a renderable "
+                     "frame\n");
+        return cleanup_projection_resources(xr, space, context1, false);
+      }
+      if (attempt < 5 || !(attempt % 100))
+        std::printf("frame attempt %u was not renderable (shouldRender=%u, "
+                    "session state=%d)\n",
+                    attempt, frameState.shouldRender,
+                    static_cast<int>(sessionState));
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
       continue;
     }
 
@@ -1008,6 +1094,18 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
     endInfo.layers = layers;
     if (!xr_ok(xr.endFrame(session, &endInfo), "xrEndFrame(projection+depth)"))
       return cleanup_projection_resources(xr, space, context1, false);
+    if (!poll_running_session_events(xr, instance, session, sessionState,
+                                     stopped))
+      return cleanup_projection_resources(xr, space, context1, false);
+    if (stopped) {
+      std::fprintf(stderr,
+                   "FAIL: session stopped after submitting a projection "
+                   "frame\n");
+      return cleanup_projection_resources(xr, space, context1, false);
+    }
+    if (!renderedFrames)
+      renderDeadline = std::chrono::steady_clock::now() +
+                       std::chrono::seconds(3);
     renderedFrames++;
     std::printf("submitted stereo color/depth projection frame %u\n",
                 renderedFrames);
@@ -1015,9 +1113,9 @@ static bool run_projection_frame(const SXrFunctions &xr, XrInstance instance,
 
   if (!renderedFrames) {
     std::fprintf(stderr,
-                 "FAIL: no renderable frame was available within %u attempts "
-                 "or three seconds\n",
-                 maxFrameAttempts);
+                 "FAIL: no renderable frame was available within ten seconds "
+                 "(%u attempts)\n",
+                 frameAttempts);
     return cleanup_projection_resources(xr, space, context1, false);
   }
   std::printf("completed %u rendered projection frames\n", renderedFrames);
@@ -1188,6 +1286,7 @@ int main(int argc, char ** argv)
         !load_xr(xr, instance, "xrDestroySession", xr.destroySession) ||
       !load_xr(xr, instance, "xrPollEvent", xr.pollEvent) ||
       !load_xr(xr, instance, "xrBeginSession", xr.beginSession) ||
+      !load_xr(xr, instance, "xrEndSession", xr.endSession) ||
       !load_xr(xr, instance, "xrWaitFrame", xr.waitFrame) ||
       !load_xr(xr, instance, "xrBeginFrame", xr.beginFrame) ||
       !load_xr(xr, instance, "xrEndFrame", xr.endFrame) ||
