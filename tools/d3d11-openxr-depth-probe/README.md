@@ -305,6 +305,14 @@ the NVIDIA adapter. Proton may map its own WineOpenXR PE path or the
 byte-identical prefix copy; both paths are pinned before launch, and the exact
 one observed in the process map is recorded and hashed.
 
+The current A/B harness keeps only OVRPlugin's non-Oculus-runtime capability
+patch. It requires the original, unmodified `OculusXRPlugin.dll` and refuses
+the old `test ecx,ecx` -> `xor ecx,ecx` patch that forced separate per-eye
+textures. A successful run must report that Unity requested Single Pass
+Instanced and that both Unity and the Oculus eye layer actually use Texture
+Array images, while retaining shared depth and the staged cross-GPU color
+path.
+
 The kernel Xid count and exact Unity-client disconnect are checked throughout.
 On every outcome the harness first stops its recorded Heroic launcher, then stops
 only the exact Meta prefix with GE-Proton's wineserver, drains diagnostics for

@@ -37,7 +37,7 @@ expected_wineopenxr_so=daf53de43cc8df0e7428b13bd51b5d12533b55a431a7971f6d531c3a2
 expected_d3d11=f5b94695a2f810128f375b66e643cb9d38a75ebae6ce48addeda9f10d30ae7a3
 expected_dxgi=18acad33d52582876abf8b67fe1b2293ae3b68d46db50bb4a84b74626fc6775b
 expected_ovr=242ad083abff0364a0618aaf1d841a494137720994a5f65981ce28f9f48aa082
-expected_oculus_xr=cfde3a993a9ea64c8008fec795b79ce303952df49a3ca9ccec2f8265032ba4ff
+expected_oculus_xr=480d206df6d3741c91e567fe5c496c5be1b59f22612b980b7b930d918ea35e9c
 expected_walkabout=543a6fe5f0c9218e70b59787b38f86e3c597dc3e70cd5f67895cf1f008f639f1
 expected_wineopenxr_json=414d9c592a68ee6051441aab8b0df2437f3448e5f96003c25fc7a40d152d6316
 expected_heroic_main=e7748b515afe02550f0668f30d616e00e835a41bcc257f57deb5f376b3b0929f
@@ -161,7 +161,7 @@ require_hash "$ovr_plugin" "$expected_ovr"
 require_hash "$oculus_xr_plugin" "$expected_oculus_xr"
 require_bytes "$ovr_plugin" 790968 1 cf
 require_bytes "$ovr_plugin" 1446208 2 751d
-require_bytes "$oculus_xr_plugin" 41068 2 31c9
+require_bytes "$oculus_xr_plugin" 41068 2 85c9
 require_bytes "$oculus_xr_plugin" 50544 8 880df9720500c3cc
 
 if pgrep -x WalkaboutMiniGo >/dev/null; then
@@ -195,7 +195,7 @@ fi
   fail "WALKABOUT_RUN_TIMEOUT_SECONDS must leave at least 30 seconds for startup"
 
 run_id=$(date +%Y%m%d-%H%M%S)
-artifact_dir="$artifact_root/walkabout-staged-$run_id"
+artifact_dir="$artifact_root/walkabout-single-pass-$run_id"
 dxvk_log_dir="$artifact_dir/dxvk"
 mkdir -p "$dxvk_log_dir"
 started=$(date --iso-8601=seconds)
@@ -397,6 +397,9 @@ while (( SECONDS < deadline )); do
     fi
     if (( player_fresh )) &&
       grep -Fq 'Shared Depth Buffer: Yes' "$player_log" &&
+      grep -Fq 'Requested Stereo Rendering Mode Single Pass Instanced' "$player_log" &&
+      grep -Fq 'Unity will render to eye texture(s) of format: Texture Array' "$player_log" &&
+      grep -Fq 'The Oculus eye layer has texture(s) of format: Texture Array' "$player_log" &&
       grep -Eq 'XRTextureManager::SetupRenderTextureFromXRRequest .* d: 0*[1-9A-Fa-f][0-9A-Fa-f]*' "$player_log"; then
       if (( workload_ready_at == 0 )); then
         cp -- "/proc/$walkabout_pid/maps" "$artifact_dir/walkabout.maps"
@@ -434,7 +437,7 @@ while (( SECONDS < deadline )); do
     grep -Fq 'NVIDIA' "$dxgi_log" || finish 1 wrong-dxgi-adapter
     grep -Fq 'D3D11' "$d3d11_log" || finish 1 native-d3d11-log-invalid
     grep -Fq 'NVIDIA' "$d3d11_log" || finish 1 wrong-d3d11-adapter
-    finish 0 unity-survived-with-staged-color
+    finish 0 unity-survived-with-staged-color-single-pass
   fi
   sleep 0.25
 done
