@@ -22,6 +22,10 @@ case "$stage" in
   bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity) ;;
   *) echo "usage: $0 [bootstrap|enumerate|views|clear|sample|teardown|recreate|discard|draw-color|draw-depth|draw-native-pair|draw-bind|draw-dsv-disabled|draw|frame|unity] [probe-dir]" >&2; exit 2 ;;
 esac
+if [[ "$stage" == unity && ${WINEOPENXR_STAGED_CROSS_GPU_COLOR:-} != 1 ]]; then
+  echo "FAIL: unity requires WINEOPENXR_STAGED_CROSS_GPU_COLOR=1" >&2
+  exit 2
+fi
 
 umu_env=(env -u HYPRLAND_INSTANCE_SIGNATURE)
 probe_dll_overrides=${WINEDLLOVERRIDES:-}
@@ -32,6 +36,7 @@ probe_dll_overrides+='d3d11=n;dxgi=n'
 umu_env+=(WINEDLLOVERRIDES="$probe_dll_overrides")
 if [[ -n ${WINEOPENXR_STAGED_CROSS_GPU_COLOR:-} ]]; then
   umu_env+=(WINEOPENXR_STAGED_CROSS_GPU_COLOR="$WINEOPENXR_STAGED_CROSS_GPU_COLOR")
+  umu_env+=(WINEDEBUG=-all,+openxr)
   echo "INFO: propagating WINEOPENXR_STAGED_CROSS_GPU_COLOR=$WINEOPENXR_STAGED_CROSS_GPU_COLOR to Proton"
 fi
 case "$stage" in
@@ -79,6 +84,8 @@ journal_cursor=$(journalctl --user -u wivrn.service -n 0 --show-cursor --no-page
 stdout_log="$probe_dir/d3d11-openxr-depth-probe.stdout.log"
 stderr_log="$probe_dir/d3d11-openxr-depth-probe.stderr.log"
 wivrn_log="$probe_dir/d3d11-openxr-depth-probe.wivrn.log"
+runner_stdout_log="$probe_dir/runner.stdout.log"
+runner_stderr_log="$probe_dir/runner.stderr.log"
 runtime_capable=()
 server_pid=$(pgrep -o -x wivrn-server || true)
 if [[ -n "$server_pid" ]] &&
@@ -88,6 +95,8 @@ if [[ -n "$server_pid" ]] &&
 fi
 : > "$stdout_log"
 : > "$stderr_log"
+: > "$runner_stdout_log"
+: > "$runner_stderr_log"
 
 set +e
 (
@@ -100,7 +109,8 @@ set +e
         PROTON_USE_XALIA=0 \
         PROTON_VERB=runinprefix \
         DXVK_LOG_LEVEL=debug \
-        "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage"
+        "$umu_run" ./d3d11-openxr-depth-probe.exe "$stage" \
+        >"$runner_stdout_log" 2>"$runner_stderr_log"
 )
 status=$?
 set -e
@@ -118,6 +128,8 @@ if (( after > before )); then
   exit 99
 fi
 
+cat "$runner_stdout_log"
+cat "$runner_stderr_log" >&2
 cat "$stdout_log"
 cat "$stderr_log" >&2
 
@@ -147,6 +159,30 @@ fi
 if ! tr -d '\r' < "$stdout_log" | grep -Fqx "$expected"; then
   echo "FAIL: stage $stage did not write its expected PASS marker: $expected" >&2
   exit 1
+fi
+
+if [[ ${WINEOPENXR_STAGED_CROSS_GPU_COLOR:-} == 1 ]]; then
+  case "$stage" in
+    draw-color|draw-bind|draw-dsv-disabled|draw|frame|unity)
+      grep -Fq 'Experimental D3D11 staged cross-GPU color is enabled' "$runner_stderr_log" || {
+        echo "FAIL: staged-color session activation was not observed" >&2
+        exit 1
+      }
+      copy_count=$(grep -Fc 'Staged-color copy:' "$runner_stderr_log" || true)
+      required_copy_count=1
+      if [[ "$stage" == frame || "$stage" == unity ]]; then
+        required_copy_count=2
+      fi
+      if (( copy_count < required_copy_count )); then
+        echo "FAIL: measured $copy_count staged-color proxy-to-transport copies, expected at least $required_copy_count" >&2
+        exit 1
+      fi
+      if grep -Eq 'Staged-color copy submission failed|Not staging unsupported color swapchain' "$runner_stderr_log"; then
+        echo "FAIL: staged-color diagnostics reported a disabled or failed copy path" >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 
 case "$stage" in
