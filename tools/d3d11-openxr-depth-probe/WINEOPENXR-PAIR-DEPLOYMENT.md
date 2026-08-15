@@ -10,6 +10,21 @@ For GE-Proton10-32 the active pair is:
 - PE: `files/lib/wine/x86_64-windows/wineopenxr.dll`
 - Unix: `files/lib/wine/x86_64-unix/wineopenxr.so`
 
+The pair used for the 2026-08-14 staged-color and Walkabout A/B campaign is
+pinned as follows:
+
+| Artifact | SHA-256 |
+|---|---|
+| GE and prefix-local `wineopenxr.dll` | `5d81cdcf216c32ed4c29e3d6d5b58b1f6522568dbbef60422460fbb576e51c9b` |
+| GE `wineopenxr.so` | `daf53de43cc8df0e7428b13bd51b5d12533b55a431a7971f6d531c3a2ab20e2f` |
+| GE and prefix-local native DXVK `d3d11.dll` | `f5b94695a2f810128f375b66e643cb9d38a75ebae6ce48addeda9f10d30ae7a3` |
+| GE and prefix-local native DXVK `dxgi.dll` | `18acad33d52582876abf8b67fe1b2293ae3b68d46db50bb4a84b74626fc6775b` |
+
+These hashes were rechecked against all seven deployed files during the
+documentation audit. They are experiment provenance, not a promise that a
+future build should retain the same bytes. The guarded runners remain the
+executable authority and must reject any unpinned replacement.
+
 Before replacement, stop only the Meta prefix with its exact wineserver, copy
 both active files into one timestamped rollback directory, and record their
 hashes. Install each candidate through a temporary file in the destination
