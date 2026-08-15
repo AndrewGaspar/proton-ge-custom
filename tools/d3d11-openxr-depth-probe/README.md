@@ -272,9 +272,9 @@ headset transport, the live compositor's focused/visible/present state, the
 complete locally built Heroic Meta runner, the exact matched WineOpenXR PE/Unix
 pair,
 the native DXVK payload and prefix copies, and an idle Walkabout process before
-launch. It also pins build 780 and verifies that only the two required
-non-Oculus compatibility bytes are changed while both known depth paths remain
-enabled:
+launch. It also pins build 780, requires the exact `OVRPlugin.dll` carrying the
+single runtime-capability byte patch, requires the original unmodified
+`OculusXRPlugin.dll`, and verifies that both known depth paths remain enabled:
 
 ```sh
 bash tools/d3d11-openxr-depth-probe/run-walkabout-guarded.sh check
@@ -316,6 +316,34 @@ Pass” from “the unmodified plugin/runtime selected Multi Pass itself.”
 `HEROIC_ROOT` may point at a controlled shadow build for this A/B; the four
 `WALKABOUT_EXPECTED_HEROIC_{MAIN,BUILD,ELECTRON,PACKAGE}_SHA256` variables must
 then pin its exact artifacts rather than weakening the existing checks.
+
+The completed 2026-08-14 A/B is negative but decisive. Evidence bundle
+`walkabout-single-pass-20260814-073312` used the original plugin, selected
+`Texture Array` in both Unity and the Oculus eye layer, then failed with
+`Failed to get layer textures`, `CreateEyeTextureStages failed`, and
+`Error on graphics thread: 1`. It produced no new NVIDIA Xid and no persistent
+fence wait attributed to the exact Unity client. Restoring this plugin therefore
+does not yet remove the workaround: it exposes an independent texture-array
+acquisition failure before eye textures are usable.
+
+That result does not invalidate staged color or client-local D32S8. The
+synthetic Unity-parity staged-color run submitted 120 stereo color/depth frames
+without a new Xid or attributed fence failure, and the patched separate-eye
+game reached the bounded health window. The latter was reported black in one
+attended launch with severe hitches, so neither a live process nor
+`unity-survived-with-staged-color` is visual certification. The next low-level
+target is a synthetic array-swapchain acquisition test, followed by another
+guarded, visually attended game run.
+
+Machine-state caveat: at the 2026-08-14 documentation audit, the shared Meta
+prefix had again acquired the old patched `OculusXRPlugin.dll`
+(`cfde3a993a9ea64c8008fec795b79ce303952df49a3ca9ccec2f8265032ba4ff`,
+bytes `31 c9` at offset 41068). The A/B harness intentionally expects the
+original hash
+`480d206df6d3741c91e567fe5c496c5be1b59f22612b980b7b930d918ea35e9c`
+and bytes `85 c9`, so its `check` mode must fail until the original file is
+restored. Do not weaken the hash/byte guard or treat the currently installed
+patched file as evidence from the valid A/B.
 
 The kernel Xid count and exact Unity-client disconnect are checked throughout.
 On every outcome the harness first stops its recorded Heroic launcher, then stops
