@@ -109,10 +109,7 @@ class StagedColorContractTest(unittest.TestCase):
     def test_source_keeps_experimental_path_narrow_and_ordered(self):
         loader = (PROTON_ROOT / "wineopenxr/openxr_loader.c").read_text()
         header = (PROTON_ROOT / "wineopenxr/openxr_loader.h").read_text()
-        carrier = (
-            PROTON_ROOT
-            / "patches/wine-hotfixes/pending/0002-wineopenxr-staged-cross-gpu-color.patch"
-        ).read_text()
+        protonprep = (PROTON_ROOT / "patches/protonprep-valve-staging.sh").read_text()
 
         self.assertIn('STAGED_COLOR_ENV "WINEOPENXR_STAGED_CROSS_GPU_COLOR"', loader)
         self.assertIn("if (!session->staged_color_enabled)", loader)
@@ -140,26 +137,16 @@ class StagedColorContractTest(unittest.TestCase):
         self.assertNotIn("VkCommandPool staged_color_command_pool", session_fields)
         self.assertIn("VkCommandPool staged_color_command_pool", swapchain_fields)
 
-        self.assertIn(
-            "Contract: staged-color command pools are swapchain-owned, not session-owned.",
-            carrier,
-        )
-        carrier_header = carrier.split(
-            "diff --git i/dlls/wineopenxr/openxr_loader.h", 1
-        )[1]
-        carrier_session = carrier_header.split(
-            "   XrSession host_session;", 1
-        )[1].split("+typedef struct {\n+  VkImage host_image;", 1)[0]
-        carrier_swapchain = carrier_header.split(
-            "   XrSwapchain host_swapchain;", 1
-        )[1]
-        self.assertNotIn("VkCommandPool staged_color_command_pool", carrier_session)
-        self.assertIn("VkCommandPool staged_color_command_pool", carrier_swapchain)
-        self.assertIn(
-            "+      .commandPool = swapchain->staged_color_command_pool,", carrier
-        )
-        self.assertNotIn(
-            "+      .commandPool = session->staged_color_command_pool,", carrier
+        # Since GE-Proton11, protonprep copies wineopenxr/ into wine's
+        # dlls/wineopenxr, so the tracked source is the build input and no
+        # carrier patch may duplicate (or contradict) it.
+        self.assertIn("cp -R ../wineopenxr/* dlls/wineopenxr/", protonprep)
+        self.assertNotIn("0002-wineopenxr-staged-cross-gpu-color.patch", protonprep)
+        self.assertFalse(
+            (
+                PROTON_ROOT
+                / "patches/wine-hotfixes/pending/0002-wineopenxr-staged-cross-gpu-color.patch"
+            ).exists()
         )
 
         release = loader.split("XrResult WINAPI xrReleaseSwapchainImage", 1)[1].split(
@@ -170,8 +157,8 @@ class StagedColorContractTest(unittest.TestCase):
         )[0]
         self.assertLess(lock_helper.index("FlushRenderingCommands"), lock_helper.index("LockSubmissionQueue"))
         self.assertLess(release.index("lock_d3d_queue"), release.index("vkQueueSubmit"))
-        self.assertLess(release.index("vkQueueSubmit"), release.index("UNIX_CALL(xrReleaseSwapchainImage"))
-        self.assertLess(release.index("UNIX_CALL(xrReleaseSwapchainImage"), release.rindex("unlock_d3d_queue"))
+        self.assertLess(release.index("vkQueueSubmit"), release.index("UNIX_CALL_CHECKED(xrReleaseSwapchainImage"))
+        self.assertLess(release.index("UNIX_CALL_CHECKED(xrReleaseSwapchainImage"), release.rindex("unlock_d3d_queue"))
         locked = release.split("lock_d3d_queue", 1)[1].rsplit("unlock_d3d_queue", 1)[0]
         for d3d_call in ("CreateTexture2D", "GetVulkanImageInfo", "TransitionSurfaceLayout"):
             self.assertNotIn(d3d_call, locked)

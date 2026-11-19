@@ -220,11 +220,18 @@ Aug 13 21:46:59.837998 framework wivrn-server[790066]:         pid: 1913667
         self.assertIn("our_d3d11[i].next = NULL;", wineopenxr)
         self.assertIn("our_d3d11[j].texture->lpVtbl->Release", wineopenxr)
 
-        destroy = wineopenxr.split("XrResult WINAPI xrDestroySwapchain", 1)[1].split(
-            "static D3D11_USAGE", 1
+        # GE-Proton11: the drain lives in drain_d3d11_swapchain_images(), which
+        # both host destroy paths call before the Unix destroy.
+        destroy = wineopenxr.split("static void drain_d3d11_swapchain_images", 1)[1].split(
+            "static void destroy_wine_swapchain", 1
         )[0]
         self.assertLess(destroy.index("WaitForGpuIdle"), destroy.index("release_d3d11_resources"))
-        self.assertLess(destroy.index("release_d3d11_resources"), destroy.index("UNIX_CALL(xrDestroySwapchain"))
+        for entry, unix_call in (
+            ("XrResult WINAPI xrDestroySwapchain(", "UNIX_CALL_CHECKED(xrDestroySwapchain"),
+            ("XrResult WINAPI xrDestroyAppConsumedSwapchainEXT(", "UNIX_CALL_CHECKED(xrDestroyAppConsumedSwapchainEXT"),
+        ):
+            body = wineopenxr.split(entry, 1)[1].split("\n}\n", 1)[0]
+            self.assertLess(body.index("drain_d3d11_swapchain_images(wine_swapchain)"), body.index(unix_call))
         enter = destroy.index("EnterCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)")
         wait = destroy.index("WaitForGpuIdle")
         leave = destroy.index("LeaveCriticalSection(&wine_swapchain->session->swapchain_destroy_lock)")
