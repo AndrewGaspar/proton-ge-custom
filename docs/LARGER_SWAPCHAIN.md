@@ -49,7 +49,28 @@ asks for a larger extent gets one.
 - With the switch on, a swapchain that is larger than a window that has shrunk
   is scaled down instead of being flagged suboptimal. DXGI applications resize on
   WM_SIZE, so they are unaffected.
-- Verification so far: the patched `dlls/win32u/vulkan.c` compiles cleanly
-  (host gcc, `-fsyntax-only` against the configured GE-Proton11-12 tree), and
-  both patches apply in protonprep order. No runtime test has been done yet,
-  because there was no disk space for a build (see the rebase report).
+- Not covered: DXVK (D3D11) still follows `currentExtent`, so a D3D11 game
+  keeps window-sized buffers. Only vkd3d-proton (D3D12) uses the larger
+  extent.
+
+## Verification (live, 2026-11-19)
+
+The test build was `GE-Proton11-12-hypxr`: a reflink copy of GE-Proton11-12
+with a host-built `win32u.so` and mingw-built `d3d12core.dll` (x86_64 and
+i386) swapped in. The test program, `tools/larger-swapchain-smoke/sbstest.c`,
+is a D3D12 window of about 1920x1058 (Hyprland floating) with a DXGI
+swapchain twice as wide. Its left and right halves differ, and it follows
+WM_SIZE with `ResizeBuffers(2*w, h)`. It ran under `proton run` with a scratch
+compat dir, `PROTON_ENABLE_WAYLAND=1` and `WAYLAND_DEBUG=1`.
+
+| Run | dmabuf `create_immed` sizes | client-surface viewport | vkd3d-proton |
+|---|---|---|---|
+| hypxr, switch on, 2x buffers | 3840x1058, 3840x1054 | `set_destination(1920, 1058)`, no `set_source` | "Surface accepts larger images, using buffer size 3840x1058 instead of surface size 1920x1058" |
+| hypxr, switch off, 2x buffers | 1920x1058, 1920x1054 | same | swapchain at surface size (blit downscale), as before |
+| original GE-Proton11-12, switch on, 2x buffers | 1920x1058, 1920x1054 | same | as before: the switch has no effect there |
+| hypxr, switch on, 1x buffers | 1920x1058, 1920x1054 | same | unchanged path |
+
+Every run exited cleanly. Hyprland resized the floating window once or twice per run
+(1058 <-> 1054 high). Each resize recreated the swapchain at the new
+buffer size. No `VK_SUBOPTIMAL_KHR` loops occurred. The compositor-side scaling
+and HypXRland's per-eye crop have not been checked visually.
