@@ -1,0 +1,132 @@
+From: Andrew Gaspar <andrew.gaspar@outlook.com>
+Subject: [PATCH] win32u: allow Vulkan swapchains larger than a Wayland window (opt-in)
+
+WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1 raises maxImageExtent above the client
+rect on instances using VK_KHR_wayland_surface (currentExtent and
+minImageExtent stay at the client rect), stops reporting VK_SUBOPTIMAL_KHR
+for a host swapchain that is larger than the client rect, and does not ask
+the host WSI to stretch such a swapchain. winewayland's client surface
+viewport has destination = client rect and no source, so the compositor
+receives the whole buffer and scales it into the window; a compositor that
+crops each half of a 2x wide side-by-side buffer per eye gets full
+resolution. X11 and the default behaviour are unchanged.
+
+Generated against the GE-Proton11-12 protonprep wine tree (all other
+patches applied); apply it last.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index c50a6b371ac..aca880a6038 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -2725,6 +2725,32 @@ static BOOL get_swapchain_surface_rect( HWND hwnd, RECT *rect, UINT dpi )
+     return !IsRectEmpty( rect );
+ }
+ 
++/* WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1 lets a swapchain on the Wayland driver be
++ * larger than its window's client rect. The Wayland driver presents the client
++ * surface through a wp_viewport whose destination is the client rect and whose
++ * source is unset, so the compositor receives the whole, larger buffer and scales
++ * it into the window. A compositor that knows better (e.g. one that crops each
++ * half of a 2x wide side-by-side stereo buffer for one eye) gets the full
++ * resolution. X11 cannot do this (an X window's buffer is its size), so it is
++ * limited to instances using VK_KHR_wayland_surface. */
++static BOOL allow_larger_swapchain( const struct vulkan_instance *instance )
++{
++    static int enabled = -1;
++
++    if (enabled == -1)
++    {
++        const char *env = getenv( "WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN" );
++        enabled = env && atoi( env ) > 0;
++        if (enabled) WARN( "Allowing Vulkan swapchains larger than their Wayland window.\n" );
++    }
++    return enabled && instance->extensions.has_VK_KHR_wayland_surface;
++}
++
++static BOOL extents_cover_rect( const VkExtent2D *extents, const RECT *rect )
++{
++    return extents->width >= rect->right - rect->left && extents->height >= rect->bottom - rect->top;
++}
++
+ static void adjust_surface_capabilities( struct vulkan_instance *instance, struct surface *surface,
+                                          VkSurfaceCapabilitiesKHR *capabilities )
+ {
+@@ -2742,10 +2768,22 @@ static void adjust_surface_capabilities( struct vulkan_instance *instance, struc
+     /* Update the image extents to match what the Win32 WSI would provide. */
+     /* FIXME: handle DPI scaling, somehow */
+     get_surface_rect( surface->hwnd, &client_rect, NtUserGetDpiForWindow( surface->hwnd ) );
++    if (allow_larger_swapchain( instance ) && !IsRectEmpty( &client_rect ))
++    {
++        /* Keep currentExtent (and the minimum) at the client rect so applications
++         * that follow currentExtent are unaffected, but accept larger images up to
++         * the host limit. An empty client rect keeps max = 0, which applications
++         * use to detect minimized windows. */
++        capabilities->maxImageExtent.width = max( capabilities->maxImageExtent.width, client_rect.right - client_rect.left );
++        capabilities->maxImageExtent.height = max( capabilities->maxImageExtent.height, client_rect.bottom - client_rect.top );
++    }
++    else
++    {
++        capabilities->maxImageExtent.width = client_rect.right - client_rect.left;
++        capabilities->maxImageExtent.height = client_rect.bottom - client_rect.top;
++    }
+     capabilities->minImageExtent.width = client_rect.right - client_rect.left;
+     capabilities->minImageExtent.height = client_rect.bottom - client_rect.top;
+-    capabilities->maxImageExtent.width = client_rect.right - client_rect.left;
+-    capabilities->maxImageExtent.height = client_rect.bottom - client_rect.top;
+     capabilities->currentExtent.width = client_rect.right - client_rect.left;
+     capabilities->currentExtent.height = client_rect.bottom - client_rect.top;
+ }
+@@ -3046,6 +3084,16 @@ static BOOL extents_equals( const VkExtent2D *extents, const RECT *rect )
+     return extents->width == rect->right - rect->left && extents->height == rect->bottom - rect->top;
+ }
+ 
++/* Whether a host swapchain of this size presents correctly into the surface's
++ * client rect: an exact match, or a larger one when allowed (see
++ * allow_larger_swapchain()). Anything else is reported as VK_SUBOPTIMAL_KHR. */
++static BOOL swapchain_extents_fit( const struct swapchain *swapchain, const RECT *client_rect )
++{
++    if (extents_equals( &swapchain->extents, client_rect )) return TRUE;
++    return allow_larger_swapchain( swapchain->surface->obj.instance ) &&
++           extents_cover_rect( &swapchain->extents, client_rect );
++}
++
+ /*
+ #version 460
+ 
+@@ -5221,6 +5269,7 @@ static VkResult win32u_vkCreateSwapchainKHR( VkDevice client_device, const VkSwa
+      */
+     if (get_swapchain_surface_rect( surface->hwnd, &client_rect, NtUserGetWinMonitorDpi( surface->hwnd, MDT_WINE_RAW_DPI ) ) &&
+         !extents_equals( &create_info_host.imageExtent, &client_rect ) &&
++        !(allow_larger_swapchain( instance ) && extents_cover_rect( &create_info_host.imageExtent, &client_rect )) &&
+         instance->extensions.has_VK_EXT_surface_maintenance1 &&
+         physical_device->extensions.has_VK_KHR_swapchain_maintenance1)
+     {
+@@ -5600,7 +5649,7 @@ static VkResult win32u_vkAcquireNextImage2KHR( VkDevice client_device, const VkA
+     }
+ 
+     if (!res && get_swapchain_surface_rect( surface->hwnd, &client_rect, NtUserGetDpiForWindow( surface->hwnd ) ) &&
+-        !extents_equals( &swapchain->extents, &client_rect ))
++        !swapchain_extents_fit( swapchain, &client_rect ))
+     {
+         WARN( "Swapchain size %dx%d does not match client rect %s, returning VK_SUBOPTIMAL_KHR\n",
+               swapchain->extents.width, swapchain->extents.height, wine_dbgstr_rect( &client_rect ) );
+@@ -5640,7 +5689,7 @@ static VkResult win32u_vkAcquireNextImageKHR( VkDevice client_device, VkSwapchai
+     }
+ 
+     if (!res && get_swapchain_surface_rect( surface->hwnd, &client_rect, NtUserGetDpiForWindow( surface->hwnd ) ) &&
+-        !extents_equals( &swapchain->extents, &client_rect ))
++        !swapchain_extents_fit( swapchain, &client_rect ))
+     {
+         WARN( "Swapchain size %dx%d does not match client rect %s, returning VK_SUBOPTIMAL_KHR\n",
+               swapchain->extents.width, swapchain->extents.height, wine_dbgstr_rect( &client_rect ) );
+@@ -6734,7 +6783,7 @@ host_present_done:
+         else if (swapchain_res)
+             WARN( "Present returned status %d for swapchain %p\n", swapchain_res, swapchain );
+         else if (!IsRectEmpty( &client_rect ) &&
+-                 !extents_equals( &swapchain->extents, &client_rect ))
++                 !swapchain_extents_fit( swapchain, &client_rect ))
+         {
+             WARN( "Swapchain size %dx%d does not match client rect %s, returning VK_SUBOPTIMAL_KHR\n",
+                   swapchain->extents.width, swapchain->extents.height, wine_dbgstr_rect( &client_rect ) );

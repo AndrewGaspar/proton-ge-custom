@@ -679,6 +679,12 @@ apply_all_in_dir() {
     echo "WINE: -PENDING- ntdll: let a thread killed during its startup exit instead of hanging (Helldivers 2 thread growth)"
     apply_patch "../patches/wine-hotfixes/pending/ntdll-dont-keep-reply-pipe-open-during-thread-init.patch"
 
+    # Opt-in (WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1): let a Wayland window take a larger Vulkan
+    # swapchain, scaled into the window by the compositor (side-by-side stereo at full resolution).
+    # Generated against the fully patched tree; keep it last. See docs/LARGER_SWAPCHAIN.md.
+    echo "WINE: -CUSTOM- win32u: allow Vulkan swapchains larger than a Wayland window (opt-in)"
+    apply_patch "../patches/wine-hotfixes/pending/win32u-allow-larger-wayland-swapchain.patch"
+
     echo "WINE: RUN AUTOCONF TOOLS/MAKE_REQUESTS"
     autoreconf -f
     ./tools/make_requests

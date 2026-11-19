@@ -1,0 +1,74 @@
+From: Andrew Gaspar <andrew.gaspar@outlook.com>
+Subject: [PATCH] vkd3d: use the DXGI buffer size when the surface accepts larger images
+
+A Win32 surface pins min/max/currentExtent to the client rect, so the
+swapchain has always followed currentExtent and the present blit scaled the
+back buffer into it. Wine's opt-in WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1
+(Wayland driver) reports maxImageExtent > currentExtent; in that case, when
+the DXGI buffers are at least the surface size, create the Vulkan swapchain
+at the buffer size so e.g. a 3840x1080 side-by-side image reaches the
+compositor unscaled, and recreate it on ResizeBuffers (the surface gives no
+suboptimal signal for a buffer-only resize). Nothing changes when the
+surface reports max == current.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/libs/vkd3d/swapchain.c b/libs/vkd3d/swapchain.c
+index 073572b2..0208cd53 100644
+--- a/libs/vkd3d/swapchain.c
++++ b/libs/vkd3d/swapchain.c
+@@ -270,6 +270,10 @@ struct dxgi_vk_swap_chain
+         /* State tracking in present tasks on how to deal with swapchain recreation. */
+         bool force_swapchain_recreation;
+         bool is_surface_lost;
++        /* The surface accepted an image extent larger than its current extent
++         * (e.g. Wine with WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1 on Wayland), so the
++         * swapchain follows the DXGI buffer size rather than the window size. */
++        bool uses_buffer_extent;
+ 
+         VkPresentModeKHR unlocked_present_mode;
+         VkPresentModeKHR selected_present_mode;
+@@ -906,6 +910,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_vk_swap_chain_ChangeProperties(IDXGIVkSwap
+      * We have drained the present queue at this point, so it's safe to poke this bool.
+      * If using native builds, it's up to the application to use ResizeBuffers properly. */
+     chain->present.force_swapchain_recreation = true;
++#else
++    /* When the swapchain follows the buffer size, a buffer resize without a window
++     * resize gives the surface no reason to report the swapchain as suboptimal. */
++    if (chain->present.uses_buffer_extent)
++        chain->present.force_swapchain_recreation = true;
+ #endif
+ 
+     return S_OK;
+@@ -2236,6 +2245,31 @@ static void dxgi_vk_swap_chain_recreate_swapchain_in_present_task(struct dxgi_vk
+         swapchain_create_info.minImageCount = surface_caps.maxImageCount;
+ 
+     swapchain_create_info.imageExtent = surface_caps.currentExtent;
++
++    /* A Win32 surface pins min/max/currentExtent to the client rect, so this
++     * normally never triggers. Wine can opt in (WINE_VULKAN_ALLOW_LARGER_SWAPCHAIN=1,
++     * Wayland driver) to accept a swapchain larger than the window, which the
++     * compositor then scales into the window. Use the DXGI buffer size in that case
++     * so a larger back buffer (e.g. a 2x wide side-by-side image) reaches the
++     * compositor at full resolution instead of being downscaled by our blit. */
++    chain->present.uses_buffer_extent = false;
++    if ((surface_caps.maxImageExtent.width > surface_caps.currentExtent.width ||
++            surface_caps.maxImageExtent.height > surface_caps.currentExtent.height) &&
++            chain->desc.Width >= surface_caps.currentExtent.width &&
++            chain->desc.Height >= surface_caps.currentExtent.height)
++    {
++        chain->present.uses_buffer_extent = true;
++        if (chain->desc.Width != surface_caps.currentExtent.width ||
++                chain->desc.Height != surface_caps.currentExtent.height)
++        {
++            INFO("Surface accepts larger images, using buffer size %ux%u instead of surface size %ux%u.\n",
++                    chain->desc.Width, chain->desc.Height,
++                    surface_caps.currentExtent.width, surface_caps.currentExtent.height);
++            swapchain_create_info.imageExtent.width = chain->desc.Width;
++            swapchain_create_info.imageExtent.height = chain->desc.Height;
++        }
++    }
++
+     swapchain_create_info.imageExtent.width = max(swapchain_create_info.imageExtent.width, surface_caps.minImageExtent.width);
+     swapchain_create_info.imageExtent.width = min(swapchain_create_info.imageExtent.width, surface_caps.maxImageExtent.width);
+     swapchain_create_info.imageExtent.height = max(swapchain_create_info.imageExtent.height, surface_caps.minImageExtent.height);
