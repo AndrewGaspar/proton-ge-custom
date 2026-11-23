@@ -18,7 +18,7 @@
 	url = https://github.com/open-wine-components/umu-protonfixes
 [submodule "vkd3d-proton"]
 	path = vkd3d-proton
-	url = https://github.com/HansKristian-Work/vkd3d-proton
+	url = https://github.com/AndrewGaspar/vkd3d-proton.git
 [submodule "OpenXR-SDK"]
 	path = OpenXR-SDK
 	url = https://github.com/KhronosGroup/OpenXR-SDK
